@@ -1,0 +1,19 @@
+## Instructions for creating the conda environment
+# conda create -n arcpy3.4 python=3.11.8
+# conda activate arcpy3.4
+# conda install arcpy=3.4 -c esri     
+# pip uninstall lxml
+# pip install --upgrade lxml
+# conda env update -f arcpy3.4.yml
+name: arcpy3.4
+channels:
+  - conda-forge
+dependencies:
+  - comm
+  - geopandas
+  - scikit-image
+  - opencv
+  - rasterio=1.3.10
+  - pyproj
+  - ipykernel
+  - numba

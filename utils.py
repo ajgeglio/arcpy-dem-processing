@@ -9,6 +9,7 @@ import glob
 import rasterio
 from osgeo import gdal
 from scipy import ndimage
+import arcpy
 
 class ReturnTime:
     def __init__(self):
@@ -330,18 +331,54 @@ class demUtils:
             print("Individual DEM tiles have been removed.")
         print(f"Merged DEM saved at: {merged_dem_path}")
         return merged_dem_path
+    
+    @staticmethod
+    def merge_dem_arcpy(dem_chunks_path, remove=True):
+        """
+        Function to merge DEM files in the specified path using arcpy.
+        Removes the individual DEM tiles after a successful merge.
+        Replaces NaN and infinite values with the nodata value (-9999) and updates the metadata.
+        """
+        dem_name = os.path.basename(dem_chunks_path)
+        
+        # Find all .tif files in the specified path
+        dem_files = glob.glob(os.path.join(dem_chunks_path, "*.tif"))
+        if not dem_files:
+            print(f"No DEM files found in the path: {dem_chunks_path}")
+            return None
+
+        # Define the output file path
+        merged_dem_path = os.path.join(os.path.dirname(dem_chunks_path), f"{dem_name}_merged.tif")
+
+        # Use arcpy's Mosaic To New Raster tool
+        arcpy.env.overwriteOutput = True
+        arcpy.management.MosaicToNewRaster(
+            input_rasters=dem_files,
+            output_location=os.path.dirname(merged_dem_path),
+            raster_dataset=os.path.basename(merged_dem_path),
+            pixel_type="32_BIT_FLOAT",
+            number_of_bands=1,
+            mosaic_method="MEAN",
+            mosaic_colormap_mode="FIRST"
+        )
+
+        # Optionally remove the individual DEM tiles
+        if remove:
+            for file in dem_files:
+                os.remove(file)
+            print("Individual DEM tiles have been removed.")
+        print(f"Merged DEM saved at: {merged_dem_path}")
+        return merged_dem_path
 
     @staticmethod
-    def reduce_and_compress_dem(dem_path):
+    def compress_tiff_with_rasterio(dem_path):
         """
-        Function that replaces nodata values with -9999, compresses using GDAL BigTIFF, 
+        Function that replaces nodata values with None, compresses using GDAL BigTIFF, 
         and compresses the DEM file using LZW compression.
-
         Parameters:
         dem_path (str): Path to the input DEM file.
-
         Returns:
-        None
+        output_path (str): Path to the compressed DEM file.
         """
         # Open the input DEM file
         with rasterio.open(dem_path) as src:
@@ -349,7 +386,7 @@ class demUtils:
             metadata.update({
                 'dtype': 'float32',
                 'compress': 'LZW',
-                'nodata': np.nan,  # Set no-data value to NaN
+                'nodata': None,  # Set no-data value to None (no explicit nodata)
                 'driver': 'GTiff',
                 'BIGTIFF': 'YES'
             })
@@ -361,12 +398,13 @@ class demUtils:
             with rasterio.open(output_path, 'w', **metadata) as dst:
                 for ji, window in src.block_windows(1):  # Process by blocks
                     dem_data = src.read(1, window=window)
-                    dem_data = np.where(np.isnan(dem_data) | np.isinf(dem_data) | (dem_data < -9999), np.nan, dem_data)
+                    dem_data = np.where(np.isnan(dem_data) | np.isinf(dem_data) | (dem_data <= -9999), None, dem_data)
                     dst.write(dem_data.astype('float32'), 1, window=window)
         print(f"Reduced and compressed DEM saved to {output_path}")
+        return output_path
 
     @staticmethod
-    def convert_tiff_to_gdal_raster(input_dem_path, out_dem_folder, compress=True):
+    def compress_tiff_with_gdal(input_dem_path, out_dem_folder, compress=True):
         """
         Convert a TIFF file to a GDAL raster TIFF using gdal_translate.
         
@@ -388,6 +426,72 @@ class demUtils:
         os.remove(input_dem_path)
         print(f"Converted {input_dem_path} to {output_tiff} with compression={compress} as GDAL raster TIFF.")
         return output_tiff
+    
+    @staticmethod
+    def compress_tiff_with_arcpy(input_raster_path, format="TIFF", overwrite=True):
+        """
+        Compress a large TIFF file using arcpy, reducing file size without changing spatial reference.
+
+        :param input_dem_path: Path to the input TIFF file.
+        :param out_dem_folder: Folder to save the compressed TIFF file.
+        :param format: options: TIFF —TIFF format
+                                COG —Cloud Optimized GeoTIFF format
+                                IMAGINE Image —ERDAS IMAGINE
+                                BMP —BMP format
+                                GIF —GIF format
+                                PNG —PNG format
+                                JPEG —JPEG format
+                                JP2 —JPEG 2000 format
+                                GRID —Esri Grid format
+                                BIL —Esri BIL format
+                                BSQ —Esri BSQ format
+                                BIP —Esri BIP format
+                                ENVI —ENVI format
+                                CRF —CRF format
+                                MRF —MRF format
+        :return: Path to the compressed TIFF file.
+        """
+
+        raster_name = Utils().sanitize_path_to_name(input_raster_path)
+        ext = format.lower()
+        out_raster_folder = os.path.dirname(input_raster_path)
+        clean_input_raster_path = os.path.join(out_raster_folder, raster_name + ext)
+        output_raster = os.path.join(out_raster_folder, raster_name + "_arcpy." + ext)
+        print(f"Compressing {input_raster_path} to {output_raster} with format={format} using arcpy.")
+        arcpy.env.overwriteOutput = True
+        arcpy.management.CopyRaster(
+            in_raster=input_raster_path,
+            out_rasterdataset=output_raster,
+            background_value="",
+            nodata_value="",
+            onebit_to_eightbit="NONE",
+            colormap_to_RGB="NONE",
+            pixel_type="32_BIT_FLOAT",
+            scale_pixel_value="NONE",
+            RGB_to_Colormap="NONE",
+            format="COG",
+            transform="NONE"
+        )
+
+        print(f"Compression using arcpy complete.")
+        # If overwrite=True, replace the original file after saving
+        if overwrite:
+            try:
+                # Release ArcPy raster references
+                import gc # Imports the garbage collection module, which provides access to the Python garbage collector.
+                gc.collect() # Explicitly runs garbage collection to free up unreferenced memory objects.
+                # Use ArcPy to delete the original raster (handles locks better than os.remove)
+                if arcpy.Exists(input_raster_path):
+                    arcpy.Delete_management(input_raster_path)
+                # Now rename the trimmed raster to the original path
+                os.rename(output_raster, clean_input_raster_path)
+                print(f"Original raster overwritten: {clean_input_raster_path}")
+                return clean_input_raster_path
+            except Exception as e:
+                print(f"Failed to overwrite original raster: {e}")
+                return output_raster
+        else:
+            return output_raster
 
     @staticmethod
     def replace_nodata_with_nan(dem_data, nodata=-9999):

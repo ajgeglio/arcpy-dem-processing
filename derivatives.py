@@ -42,7 +42,8 @@ class HabitatDerivatives:
         shannon_window=21,
         products=None,
         fill_iterations=1,
-        fill_method=None
+        fill_method=None,
+        generate_boundary=True
     ):
         """
         Initialize the HabitatDerivatives class.
@@ -75,7 +76,8 @@ class HabitatDerivatives:
         self.shannon_window = shannon_window
         self.products = products if products is not None else []
         self.fill_iterations = fill_iterations  # Number of iterations for filling gaps
-        self.fill_method = fill_method # IDW or FocalStatistics
+        self.fill_method = fill_method # IDW or FocalStatistics or None
+        self.generate_boundary = generate_boundary # for binary mask and boundary shapefile
         self.message_length = 0
 
         # Get input DEM file and name and create folders
@@ -88,7 +90,9 @@ class HabitatDerivatives:
 
         # generate the cleaned data boundary and binary mask tif
         self.inpainter = Inpainter(input_dem, save_path=self.output_folder)
-        self.binary_mask, dissolved_polygon = self.inpainter.get_data_boundary(min_area=50)
+
+        if self.generate_boundary:
+            self.binary_mask, dissolved_polygon = self.inpainter.get_data_boundary(min_area=50)
 
         if self.fill_method is not None:
             # Generate the fill raster
@@ -379,7 +383,18 @@ class HabitatDerivatives:
         else:
             window = self.shannon_window
         # creating output file paths based on the product list
-        output_files = {key: os.path.join(self.out_dem_folder, self.dem_name +"_"+ key + ".tif") for key in self.products}
+        output_files = {}
+        for key in self.products:
+            if key == "shannon_index":
+                output_files[key] = os.path.join(
+                    self.out_dem_folder,
+                    f"{self.dem_name}_{key}_{self.shannon_window}.tif"
+                )
+            else:
+                output_files[key] = os.path.join(
+                    self.out_dem_folder,
+                    f"{self.dem_name}_{key}.tif"
+                )
         output_slope=output_files.get("slope")
         output_aspect=output_files.get("aspect")
         output_roughness=output_files.get("roughness")
@@ -462,7 +477,7 @@ class HabitatDerivatives:
                 # Only trim the shannon index product after conversion
                 if "shannon" in str(output_file).lower():
                     shannon_dem = os.path.join(self.output_folder, self.dem_name, self.dem_name + "_shannon_index.tif")
-                    self.inpainter.trim_raster(shannon_dem, self.binary_mask, overwrite=True)
+                    self.inpainter.trim_raster(shannon_dem, self.binary_mask, overwrite=False)
 
         else:
             with rasterio.open(input_dem) as src:
@@ -535,9 +550,11 @@ class HabitatDerivatives:
                 # Merge the tiles and clean up
                 for _, output_file in generate_products():
                     dem_chunks_path = os.path.join(os.path.dirname(output_file), os.path.basename(output_file).split(".")[0])
-                    merged_dem = demUtils.merge_dem(dem_chunks_path)
-                    if "shannon" in str(merged_dem).lower():
+                    # merged_dem = demUtils.merge_dem(dem_chunks_path, remove=True)
+                    merged_dem = demUtils.merge_dem_arcpy(dem_chunks_path, remove=True)
+                    if "shannon" in str(merged_dem).lower() or "lbp" in str(merged_dem).lower():
                         self.inpainter.trim_raster(merged_dem, self.binary_mask, overwrite=True)
+                    demUtils.compress_tiff_with_arcpy(merged_dem, format="TIFF", overwrite=True)
 
 # example usage
 if __name__ == "__main__":

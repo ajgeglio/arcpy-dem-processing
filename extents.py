@@ -110,7 +110,7 @@ class GetCoordinates:
         reef_dict = {"BH": "Bay Harbor", "CH": "Cathead Point", "ER": "Elk Rapids", "FI": "Fishermans Island", "IP":"Ingalls Point",
                 "LR": "Lees Reef", "MS": "Manistique Shoal", "MP": "Mission Point", "MR":"Mudlake Reef", "NPNE": "Northport Bay NE",
                 "NPNW":"Northport Bay NW", "NPS":"Northport Bay S", "NP": "Northport Point", "SP": "Suttons Point", 
-                "TC":"Tannery Creek", "TS":"Traverse Shoal", "TP":"Tuckers Point", "WP": "Wiggins Point", "GHR": "Good Harbor Reef", "TB":"Thunder Bay", "Ingalls": "IP"}
+                "TC":"Tannery Creek", "TS":"Traverse Shoal", "TP":"Tuckers Point", "WP": "Wiggins Point", "GHR": "Good Harbor Reef", "TB":"Thunder Bay", "Ingalls": "IP", "Other": "Other"}
         min_max = [self.get_min_max_xy(t) for t in tif_files]
         names = [Utils().sanitize_path_to_name(t) for t in tif_files]
         # reefs = [os.path.basename(os.path.dirname(t)) for t in tif_files]
@@ -127,7 +127,11 @@ class GetCoordinates:
         min_max_df["reef"] = reefs
         min_max_df["filepath"] = tif_files
         min_max_df = min_max_df.drop_duplicates(subset="reef").reset_index(drop=True)
-        min_max_df["Reef_Name"] = min_max_df.reef.apply(lambda x: reef_dict[x])
+        try:
+            min_max_df["Reef_Name"] = min_max_df.reef.apply(lambda x: reef_dict[x])
+        except KeyError:
+            # If the reef is not in the dictionary, assign "Other"
+            min_max_df["Reef_Name"] = min_max_df.reef.apply(lambda x: reef_dict.get(x, "Other"))
         return min_max_df
     
     def log_col_lat_lon(self, root):

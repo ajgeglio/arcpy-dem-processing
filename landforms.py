@@ -3,38 +3,64 @@ import os, json
 import numpy as np
 import matplotlib.pyplot as plt
 import arcpy
+import shutil
+import arcpy.management
 from arcpy.sa import *
 from utils import Utils
-from derivatives import HabitatDerivatives
 from landforms import GeomorphonLandforms
 
 class Landforms:
-    def __init__(self, input_dem_path, geomorphons_directory="..\\geomorphons", local_workspace="..\\local_workspace"):
-        self.geomorphons_directory = geomorphons_directory
-        self.local_workspace = local_workspace
-        self.input_dem = input_dem_path
-        
-        # Extract DEM name and define output raster paths
-        self.input_dem_name = Utils().sanitize_path_to_name(input_dem_path)
-        self.geomorphons_folder = os.path.join(self.geomorphons_directory, self.input_dem_name)
-        self.bathymorphons_raster = f"{self.input_dem_name}_bathymorphons.tif"
+    def __init__(self, input_raster_path):
+        self.input_dem = input_raster_path
+        self.input_dem_name = Utils.sanitize_path_to_name(input_raster_path)
 
+        # Determine the base directory for outputs (one level up from input_raster_path)
+        base_output_dir = os.path.dirname(os.path.dirname(input_raster_path))
+        self.geomorphons_directory = os.path.join(base_output_dir, "geomorphons")
+        self.local_workspace = self.geomorphons_directory # Use the same for workspace
         
-        # Ensure output and workspace directories exist
-        os.makedirs(self.geomorphons_folder, exist_ok=True)
-        os.makedirs(self.local_workspace, exist_ok=True)
-        arcpy.env.overwriteOutput = True
-        arcpy.env.workspace = self.local_workspace
-        arcpy.env.scratchWorkspace = self.local_workspace
         # --- 0. License Check ---
         if arcpy.CheckExtension("Spatial") == "Available":
             arcpy.CheckOutExtension("Spatial")
             arcpy.AddMessage("Spatial Analyst extension checked out.")
         else:
             arcpy.AddError("Spatial Analyst extension is not available. Cannot proceed.")
-            # Raising an exception here is good practice if this function is part of a larger script
-            # that might depend on its successful execution.
             raise arcpy.ExecuteError("Spatial Analyst license is unavailable.")
+
+        # Ensure output and workspace directories exist
+        os.makedirs(self.geomorphons_directory, exist_ok=True)
+        os.makedirs(self.local_workspace, exist_ok=True)
+
+        # Set arcpy environment settings
+        arcpy.env.workspace = self.local_workspace
+        arcpy.env.overwriteOutput = True
+        arcpy.env.scratchWorkspace = self.local_workspace
+
+        # Store original raster env settings
+        dem_desc = arcpy.Describe(self.input_dem)
+        self.original_spatial_ref = dem_desc.spatialReference
+        self.original_cell_size = float(arcpy.management.GetRasterProperties(self.input_dem, "CELLSIZEX").getOutput(0))
+        self.original_extent = self.input_dem
+        self.original_snap_raster = self.input_dem
+
+        # Set arcpy.env variables to match input DEM
+        # These will be explicitly reset in methods that need specific alignments
+        arcpy.env.outputCoordinateSystem = self.original_spatial_ref
+        arcpy.env.snapRaster = self.original_snap_raster
+        arcpy.env.cellSize = self.original_cell_size
+        arcpy.env.extent = self.original_extent
+
+        # Extract DEM name and define output raster paths
+        self.bathymorphons_raster = f"{self.input_dem_name}_bathymorphons.tif"
+        self.bathymorphon_raster_path = os.path.join(self.local_workspace, self.bathymorphons_raster)
+
+    def __del__(self):
+        if arcpy.CheckExtension("Spatial") == "Available":
+            try:
+                arcpy.CheckInExtension("Spatial")
+                arcpy.AddMessage("Spatial Analyst extension checked in.")
+            except Exception as e:
+                arcpy.AddWarning(f"Could not check in Spatial Analyst extension: {e}")
 
     def calculate_geomorphon_landforms(self, angle_threshold=1, distance_units="METERS", search_distance=10, skip_distance=5, z_unit="METER"):
         """
@@ -52,55 +78,84 @@ class Landforms:
         Returns:
         - str: Path to the saved geomorphons raster file.
         """
-        # Set environment settings
+        # Set environment settings to match original raster before processing
+        arcpy.env.outputCoordinateSystem = self.original_spatial_ref
+        arcpy.env.snapRaster = self.original_snap_raster # Snap to its own grid initially
+        arcpy.env.cellSize = self.original_cell_size
+        arcpy.env.extent = self.original_extent
         arcpy.env.workspace = self.local_workspace
+        arcpy.env.scratchWorkspace = self.local_workspace
 
-        # Check out the ArcGIS Spatial Analyst extension license
         arcpy.CheckOutExtension("Spatial")
 
-        out_raster = os.path.join(self.geomorphons_folder, f"{self.input_dem_name}_landforms_orig.tif")
+        raw_geomorphon_output_path  = os.path.join(self.geomorphons_directory, f"{self.input_dem_name}_landforms_orig.tif")
         
         # Execute the GeomorphonLandforms tool
         out_geomorphon_landforms = GeomorphonLandforms(
-            self.input_dem, self.bathymorphons_raster, angle_threshold, distance_units,
+            self.input_dem, self.bathymorphon_raster_path, angle_threshold, distance_units,
             search_distance, skip_distance, z_unit
         )
-        # Save the output raster
-        out_geomorphon_landforms.save(out_raster)
 
-    def analyze_raster_data(raster):
-        # Open the raster file
+        # Check if the output raster is valid
+        if out_geomorphon_landforms is None:
+            arcpy.AddError("GeomorphonLandforms tool did not return a valid output.")
+            return None
+
+        out_geomorphon_landforms.save(raw_geomorphon_output_path)
+        # final_output_raster_path = rasterUtils.con_fill(self.input_dem, raw_geomorphon_output_path)
+        final_output_raster_path = raw_geomorphon_output_path
+
+        if Raster(raw_geomorphon_output_path) is None:
+            arcpy.AddError(f"Failed to save the geomorphons raster: {raw_geomorphon_output_path}")
+            raise Exception("Geomorphon fill failed.")
+       
+        # At this point, final_output_raster_path holds the geomorphons raster,
+        # snapped to the master grid (if applicable) and ready for final clipping.
+        return final_output_raster_path
+
+    @staticmethod
+    def analyze_geomorphon_data(raster):
+        """
+        Analyze a classified geomorphon raster and plot a histogram of terrain classes.
+
+        Parameters:
+        raster (str): Path to the classified raster file.
+        """
         with rasterio.open(raster) as src:
-            # Read the raster data as a numpy array
-            raster_data = src.read(1)  # Read the first band
-            # Get raster metadata
+            raster_data = src.read(1, masked=True)
             metadata = src.meta
-            # Read the metadata tags
             tags = src.tags()
-            print("Tags in the DEM file:")
-            print(json.dumps(tags, indent=4))  # Pretty print the tags
 
-        # Mask the nodata value
-        masked_data = raster_data[raster_data != metadata['nodata']]
-        # Analyze the raster values
-        min_value = np.min(masked_data)
-        max_value = np.max(masked_data)
-        unique_values = len(np.unique(masked_data))
+        value_to_label = json.loads(tags["value_to_label"])
+        label_map = {int(k): v for k, v in value_to_label.items()}
 
-        print(f"Raster Metadata: {metadata}")
-        print(f"Minimum Value: {min_value}")
-        print(f"Maximum Value: {max_value}")
-        print(f"Number of unique values ignoring nodata: {unique_values}")
-        # Create the histogram
-        plt.hist(masked_data, bins=np.arange(1, 12) - 0.5, color='blue', edgecolor='black')
-        plt.xticks(range(1, 11))  # Ensure x-axis is 1-10 by 1
-        plt.title("Histogram of Raster Data")
-        plt.xlabel("Value")
-        plt.ylabel("Frequency")
+        colors = plt.cm.get_cmap("tab10", 10).colors
+
+        # Mask out nodata values
+        valid_mask = raster_data != metadata.get('nodata', None)
+        masked_data = raster_data[valid_mask]
+
+        fig, ax = plt.subplots()
+        for i, class_id in enumerate(sorted(label_map.keys())):
+            class_data = masked_data[masked_data == class_id]
+            ax.hist(class_data,
+                    bins=np.arange(class_id - 0.5, class_id + 1.5, 1),
+                    color=colors[i % len(colors)],
+                    edgecolor='black',
+                    label=label_map[class_id])
+
+        ax.legend(title="Terrain Classes")
+        ax.set_xlabel("DEM Class ID")
+        ax.set_ylabel("Frequency")
+        ax.set_title("Histogram of Terrain Classes")
+        plt.xticks(range(1, 11))
+        plt.tight_layout()
         plt.show()
+
     
     def classify_landform_from_bathymorphon(self, number, classes="10c"):
         """
+        https://www.hydroffice.org/manuals/bress/stable/user_manual_landforms_tab.html#bathymorphons
         Function to calculate potential local ternary patterns for a given integer number.
         Then pass the ternary pattern to the lookup table to classify the landform.
         The lookup table is based on the number of minuses and pluses in the ternary pattern.
@@ -139,7 +194,7 @@ class Landforms:
                 (1, 0): "FL", (1, 1): "FL", (1, 2): "SL", (1, 3): "SL", (1, 4): "VL", (1, 5): "VL", (1, 6): "VL", (1, 7): "VL",
                 (2, 0): "FL", (2, 1): "SL", (2, 2): "SL", (2, 3): "SL", (2, 4): "SL", (2, 5): "VL", (2, 6): "VL",
                 (3, 0): "SL", (3, 1): "SL", (3, 2): "SL", (3, 3): "SL", (3, 4): "SL", (3, 5): "SL",
-                (4, 0): "SH", (4, 1): "SH", (4, 2): "SL", (4, 3): "SL", (4, 4): "SL",
+                (4, 0): "RI", (4, 1): "RI", (4, 2): "SL", (4, 3): "SL", (4, 4): "SL",
                 (5, 0): "RI", (5, 1): "RI", (5, 2): "RI", (5, 3): "SL",
                 (6, 0): "RI", (6, 1): "RI", (6, 2): "RI",
                 (7, 0): "RI", (7, 1): "RI",
@@ -160,8 +215,9 @@ class Landforms:
         landform_abrv_to_int_dict = {
             "FL": 1, "PK": 2, "RI": 3, "SH": 4, "CV": 5, "SL": 6, "CN": 7, "FS": 8, "VL": 9, "PT": 10
         }
-        if number < 0:
-            raise ValueError("The input number must be a non-negative integer.")
+        if number < 0 or number is None or np.isnan(number):
+            # Return the input value (nodata) or np.nan for nodata cells
+            return number
         
         ternary_patterns = []
         while number > 0:
@@ -183,6 +239,7 @@ class Landforms:
         return land_int
 
     def classify_bathymorphons(self, classes="10c"):
+
         """
         Process a raster file, classify its values using a given function, and save the modified raster.
 
@@ -194,17 +251,21 @@ class Landforms:
         Returns:
         str: Path to the saved output raster file.
         """
+        # Set environment settings to match original raster before processing
+        arcpy.env.outputCoordinateSystem = self.original_spatial_ref
+        arcpy.env.snapRaster = self.original_snap_raster
+        arcpy.env.cellSize = self.original_cell_size
         value_to_label = {1:"Flat", 2:"Peak", 3:"Ridge", 4:"Shoulder", 5:"Spur (Convex slope)", 6:"Slope", 7:"Hollow (Concave slope)", 8:"Footslope", 9:"Valley", 10:"Pit"}
-        bathymorphon_raster_path = os.path.join(self.local_workspace, self.bathymorphons_raster)
-        with rasterio.open(bathymorphon_raster_path) as src:
+        
+        with rasterio.open(self.bathymorphon_raster_path) as src:
             # Read the raster data as a numpy array
-            raster_data = src.read(1)  # Read the first band
+            raster_data = src.read(1)  # Read the first band with masked=True
             # Get raster metadata
             metadata = src.meta
 
         raster_name = self.input_dem_name
         # Mask the nodata value
-        masked_data = raster_data[raster_data != metadata['nodata']]
+        masked_data = raster_data[raster_data != metadata["nodata"]]
 
         # Apply the classification function to the masked data
         vectorized_classify = np.vectorize(lambda x: self.classify_landform_from_bathymorphon(x, classes=classes))
@@ -214,7 +275,7 @@ class Landforms:
         raster_data[raster_data != metadata['nodata']] = masked_data
 
         # Define the output file path
-        output_file = os.path.join(self.geomorphons_folder, f"{raster_name}_{classes}.tif")
+        output_file = os.path.join(self.geomorphons_directory, f"{raster_name}_{classes}.tif")
 
         # Write the modified raster data to the output file
         with rasterio.open(output_file, 'w', **metadata) as dst:
@@ -222,5 +283,38 @@ class Landforms:
             dst.write(raster_data, 1)
             # Update metadata with value_to_label as a JSON string
             dst.update_tags(**{"value_to_label": json.dumps(value_to_label)})
-        converted_tiff = HabitatDerivatives(input_dem=self.input_dem , output_folder=self.geomorphons_directory).convert_tiff_to_gdal_raster(output_file, compress=False)
-        return converted_tiff
+
+        # Reset arcpy.env variables after processing
+        arcpy.env.outputCoordinateSystem = self.original_spatial_ref
+        arcpy.env.snapRaster = self.original_snap_raster
+        arcpy.env.cellSize = self.original_cell_size
+
+        # Return the path to the saved output raster file
+        return output_file
+       
+    def generate_landforms(self):
+        
+        landforms = Landforms(self.input_dem)
+        landforms.calculate_geomorphon_landforms()
+
+        # # calculate the 10class solution
+        output_file10c = landforms.classify_bathymorphons(classes="10c")
+        print(f"Modified raster data saved to {output_file10c}")
+
+        # # calculate the 6class solution
+        output_file6c = landforms.classify_bathymorphons(classes="6c")
+        print(f"Modified raster data saved to {output_file6c}")
+
+        # # calculate the 5class solution
+        output_file5c = landforms.classify_bathymorphons(classes="5c")
+        print(f"Modified raster data saved to {output_file5c}")
+
+        # # calculate the 4class solution
+        output_file4c = landforms.classify_bathymorphons(classes="4c")
+        print(f"Modified raster data saved to {output_file4c}")
+    
+# example usage
+if __name__ == "__main__":
+    path = "path/to/dem_raster.tif"
+    landforms = Landforms(input_raster_path=path)
+    landforms.calculate_geomorphon_landforms()

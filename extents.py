@@ -6,10 +6,11 @@ from arcpy.sa import *
 from osgeo import gdal, osr
 from utils import Utils
 
-class GetCoordinates:
+class GetExtents:
     def __init__(self) -> None:
         pass
 
+    @staticmethod
     def reef_overlap(df_tiffs, OP_TABLE_path):
         OP_TABLE_df = pd.read_excel(OP_TABLE_path)
         OP_TABLE_df = OP_TABLE_df[["COLLECT_ID", "OP_DATE", "SURVEY123_NAME", "REEF_NAME", "LATITUDE", "LONGITUDE"]]
@@ -30,12 +31,14 @@ class GetCoordinates:
             out_df = pd.concat([out_df, new_df])
         return out_df[["COLLECT_ID", "OP_DATE", "SURVEY123_NAME", "REEF_NAME", "LATITUDE", "LONGITUDE", "REEF", "DIST"]]
     
-    def get_projection(self, tif_file):
+    @staticmethod
+    def get_projection(tif_file):
         ds = gdal.Open(tif_file)
         cs = osr.SpatialReference()
         return cs.ImportFromWkt(ds.GetProjectionRef())
 
-    def get_min_max_xy(self, tif_file):
+    @staticmethod
+    def get_min_max_xy(tif_file):
         ds = gdal.Open(tif_file)
         old_cs = osr.SpatialReference()
         old_cs.ImportFromWkt(ds.GetProjectionRef())
@@ -59,6 +62,7 @@ class GetCoordinates:
         #get the coordinates in lat long
         return transform.TransformPoint(miny,minx)[0:2], transform.TransformPoint(maxy,maxx)[0:2]
     
+    @staticmethod
     def convert_tracklines_to_lat_lon(xyd_file, from_wkt, wgs84_wkt):
     
         with open(from_wkt) as f:
@@ -90,6 +94,7 @@ class GetCoordinates:
         
         return lat_lon_coords
     
+    @staticmethod
     def get_tif_coordinate_system(tif_file):
         # Function to get the coordinate system of the tif file
         ds = gdal.Open(tif_file)
@@ -98,25 +103,51 @@ class GetCoordinates:
         srs.ImportFromWkt(proj_wkt)
         return srs
 
-    def infer_xyd_coordinate_system(xyd_file):
-        # Function to infer the coordinate system of the xyd_file
-        # Assuming the coordinates are in UTM zone 16N (you may need to adjust this based on your region)
-        utm_zone = 16
-        northern_hemisphere = True
-        proj_str = f"+proj=utm +zone={utm_zone} +datum=WGS84 +units=m +no_defs"
-        return pyproj.CRS(proj_str)
+    @staticmethod
+    def infer_xyz_coordinate_system(xyz_file, sample_size=1000):
+        """
+        Infers the coordinate system of an XYZ file by inspecting coordinate ranges.
+        Assumes the file has three columns: X, Y, Z (no header).
+        """
+        try:
+            # Read a sample of the file
+            df = pd.read_csv(xyz_file, delim_whitespace=True, header=None, names=["X", "Y", "Z"], nrows=sample_size)
+            x_vals = df["X"]
+            y_vals = df["Y"]
 
-    def return_min_max_tif_df(self, tif_files=[]):
+            # Heuristic: if values look like lat/lon
+            if x_vals.between(-180, 180).all() and y_vals.between(-90, 90).all():
+                return pyproj.CRS("EPSG:4326")  # WGS84 Geographic
+
+            # Heuristic: if values look like UTM (easting/northing in meters)
+            if x_vals.min() > 100000 and x_vals.max() < 1000000 and y_vals.min() > 0:
+                # Estimate UTM zone from mean longitude
+                mean_lon = x_vals.mean()
+                utm_zone = int((mean_lon + 180) / 6) + 1
+                northern = y_vals.mean() > 0
+                hemisphere = "+north" if northern else "+south"
+                proj_str = f"+proj=utm +zone={utm_zone} {hemisphere} +datum=WGS84 +units=m +no_defs"
+                return pyproj.CRS(proj_str)
+
+            # Fallback
+            return pyproj.CRS("EPSG:3857")  # Web Mercator as generic fallback
+
+        except Exception as e:
+            print(f"Could not infer CRS: {e}")
+            return None
+
+    @staticmethod
+    def return_min_max_tif_df(tif_files=[]):
         reef_dict = {"BH": "Bay Harbor", "CH": "Cathead Point", "ER": "Elk Rapids", "FI": "Fishermans Island", "IP":"Ingalls Point",
                 "LR": "Lees Reef", "MS": "Manistique Shoal", "MP": "Mission Point", "MR":"Mudlake Reef", "NPNE": "Northport Bay NE",
                 "NPNW":"Northport Bay NW", "NPS":"Northport Bay S", "NP": "Northport Point", "SP": "Suttons Point", 
                 "TC":"Tannery Creek", "TS":"Traverse Shoal", "TP":"Tuckers Point", "WP": "Wiggins Point", "GHR": "Good Harbor Reef", "TB":"Thunder Bay", "Ingalls": "IP", "Other": "Other"}
-        min_max = [self.get_min_max_xy(t) for t in tif_files]
+        min_max = [GetExtents.get_min_max_xy(t) for t in tif_files]
         names = [Utils().sanitize_path_to_name(t) for t in tif_files]
         # reefs = [os.path.basename(os.path.dirname(t)) for t in tif_files]
         reefs = [n.split("_")[0] for n in names]
-        min_y, min_x = [min_max[i][0][0] for i in range(len(min_max))], [min_max[i][0][1] for i in range(len(min_max))]
-        max_y, max_x  = [min_max[i][1][0] for i in range(len(min_max))], [min_max[i][1][1] for i in range(len(min_max))]
+        min_x, min_y = [min_max[i][0][0] for i in range(len(min_max))], [min_max[i][0][1] for i in range(len(min_max))]
+        max_x, max_y  = [min_max[i][1][0] for i in range(len(min_max))], [min_max[i][1][1] for i in range(len(min_max))]
         min_max_df = pd.DataFrame(np.c_[names, min_y, min_x, max_y, max_x], columns=["filename", "min_lat", "min_lon", "max_lat", "max_lon"])
         min_max_df.min_lat = min_max_df.min_lat.astype('float')
         min_max_df.min_lon = min_max_df.min_lon.astype('float')
@@ -134,7 +165,8 @@ class GetCoordinates:
             min_max_df["Reef_Name"] = min_max_df.reef.apply(lambda x: reef_dict.get(x, "Other"))
         return min_max_df
     
-    def log_col_lat_lon(self, root):
+    @staticmethod
+    def log_col_lat_lon(root):
         out_df = pd.DataFrame()
         for collect_id in os.listdir(root):
             logpath = r"logs\*\Logs\*.log"
@@ -152,7 +184,8 @@ class GetCoordinates:
             out_df = pd.concat([out_df, df])
         return out_df
     
-    def return_headers_min_max_coord(self, df):
+    @staticmethod
+    def return_headers_min_max_coord(df):
         collects = df.collect_id.unique()
         coords = []
         for c in collects:
@@ -170,7 +203,8 @@ class GetCoordinates:
         collects_lat_lon = pd.DataFrame(np.c_[collects, coords], columns=["collect_id", "min_lat", "min_lon", "max_lat", "max_lon", "med_lat", "med_lon"])
         return collects_lat_lon
     
-    def return_MissionLog_min_max_coord(self, collect):
+    @staticmethod
+    def return_MissionLog_min_max_coord(collect):
         log_paths = glob.glob(os.path.join(collect,'logs','*','Logs','*.log'))
         try:
             dfs = [pd.read_csv(file, header=0, delimiter=';').dropna(axis=1) for file in log_paths]
@@ -185,10 +219,11 @@ class GetCoordinates:
             min_lat, min_lon, max_lat, max_lon = np.nan, np.nan, np.nan, np.nan
         return min_lat, min_lon, max_lat, max_lon
     
-    def return_MissionLog_min_max_df(self, collect_list):
+    @staticmethod
+    def return_MissionLog_min_max_df(collect_list):
         items = []
         for collect in collect_list:
-            min_lat, min_lon, max_lat, max_lon = self.return_MissionLog_min_max_coord(collect)
+            min_lat, min_lon, max_lat, max_lon = GetExtents.return_MissionLog_min_max_coord(collect)
             item = [collect, min_lat, min_lon, max_lat, max_lon]
             items.append(item)
         df = pd.DataFrame(items, columns=["collect_path", "min_lat", "min_lon", "max_lat", "max_lon"])
@@ -204,4 +239,4 @@ class GetCoordinates:
         df["AUV"] = df.collect_id.apply(iv)
         df["cam_sys"] = df.collect_id.apply(cs)
         df = df[["collect_path", "collect_id", "date", "collect", "AUV", "cam_sys", "min_lat", "min_lon", "max_lat", "max_lon"]]
-        return df 
+        return df

@@ -8,7 +8,7 @@ import numba.types
 some functions to calculate entropy and flow direction
 outside of class to avoid circular imports
 '''
-
+@staticmethod
 def calculate_window_entropy(window):
     """Calculate entropy for a given window."""
     _, counts = np.unique(window, return_counts=True)
@@ -20,6 +20,7 @@ direction_encoding = np.array([[32, 64, 128],
                                [16, 0, 1],
                                [8, 4, 2]])
 
+@staticmethod
 def flow_direction_window(window):
     """Process a 3x3 window to calculate flow direction."""
     # Reshape the 1D window to 3x3
@@ -30,6 +31,7 @@ def flow_direction_window(window):
     max_diff = np.max(diff)
     return direction_encoding[diff == max_diff].sum() if max_diff > 0 else 0
 
+@staticmethod
 def fast_entropy(arr):
     """Fast entropy calculation for a 1D array."""
     _, counts = np.unique(arr, return_counts=True)

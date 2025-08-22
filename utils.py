@@ -6,10 +6,7 @@ import pandas as pd
 import pickle
 import re
 import glob
-import rasterio
-from osgeo import gdal
-from scipy import ndimage
-import arcpy
+import sys
 
 class ReturnTime:
     def __init__(self):
@@ -169,6 +166,24 @@ class WorkspaceCleaner:
 
 class Utils:
     @staticmethod
+    def remove_additional_files(directory, exts=[".ovr", ".cpg", ".dbf", ".tfw", ".xml"]):
+        """Recursively remove additional files with specified extensions in directory and subdirectories."""
+        removed_files = []
+        for root, dirs, files in os.walk(directory):
+            for file in files:
+                if any(file.lower().endswith(e) for e in exts):
+                    file_path = os.path.join(root, file)
+                    try:
+                        os.remove(file_path)
+                        removed_files.append(file_path)
+                    except Exception as e:
+                        print(f"Could not remove {file_path}: {e}")
+        if removed_files:
+            print(f"Removed files: {removed_files}")
+        else:
+            print("No additional files found to remove.")
+
+    @staticmethod
     def time_convert(sec):
         mins = sec // 60
         sec = sec % 60
@@ -191,21 +206,22 @@ class Utils:
         padded_message = message.ljust(max(previous_length, terminal_width))
         print(padded_message, end="\r")
         return len(message)
-
-    def sanitize_path_to_name(self, path):
+    
+    @staticmethod
+    def sanitize_path_to_name(path):
         """Replace invalid characters and get the base file name from a path."""
         name = os.path.splitext(os.path.basename(path))[0]
         return name.replace(".", "_").replace(" ", "_")
+    
+    @staticmethod
+    def add_src_to_path():
+        # Ensure src is on sys.path regardless of working directory
+        SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+        SRC_DIR = os.path.abspath(os.path.join(SCRIPT_DIR, "..", "src"))
+        if SRC_DIR not in sys.path:
+            sys.path.insert(0, SRC_DIR)
 
-    def bagfile_from_image(filename, aluim_path, window=30):
-        image_id = filename.split(".")[0]
-        time_sec = float(image_id.split("_")[1] +"." + image_id.split("_")[2])
-        print("Image Date and Time:")
-        print(datetime.datetime.fromtimestamp(time_sec).strftime('%Y-%m-%d %H:%M:%S'))
-        aluim = pd.read_csv(aluim_path, index_col=0, low_memory=False)
-        aluim21_window = aluim[(aluim.Time_s >= time_sec-window/2) & (aluim.Time_s <= time_sec+window/2)]
-        print(aluim21_window.BagFile.values)
-
+    @staticmethod
     def copy_files(src_pths, dest_folder):
         l = len(src_pths)
         for i, img_pth in enumerate(src_pths):
@@ -222,32 +238,54 @@ class Utils:
                 print("Copying", i,"/",l, end='  \r')
             else: print(f"{src} not found")
 
+    @staticmethod
+    def chunk_and_move_files(file_list, source_dir, chunk_size_gb=10):
+        dest_dir = source_dir  # Destination chunks live here too
+
+        chunk_size_bytes = chunk_size_gb * 1024**3
+        current_chunk = []
+        current_size = 0
+        chunk_count = 1
+
+        for file_name in file_list:
+            file_path = os.path.join(source_dir, file_name)
+            file_size = os.path.getsize(file_path)
+
+            if current_size + file_size > chunk_size_bytes and current_chunk:
+                chunk_dir = os.path.join(dest_dir, f"chunk_{chunk_count}")
+                os.makedirs(chunk_dir, exist_ok=True)
+
+                for f in current_chunk:
+                    shutil.move(os.path.join(source_dir, f), os.path.join(chunk_dir, f))
+
+                chunk_count += 1
+                current_chunk = []
+                current_size = 0
+
+            current_chunk.append(file_name)
+            current_size += file_size
+
+        if current_chunk:
+            chunk_dir = os.path.join(dest_dir, f"chunk_{chunk_count}")
+            os.makedirs(chunk_dir, exist_ok=True)
+            for f in current_chunk:
+                shutil.move(os.path.join(source_dir, f), os.path.join(chunk_dir, f))
+
+    @staticmethod
     def load_pickle(pickle_pth): #unpickling
         with open(pickle_pth, "rb") as fp:   
             pf = pickle.load(fp)
         return pf
+    
+    @staticmethod
     def dump_pickle(pickle_pth, pf): #pickling
         with open(pickle_pth, "wb") as fp:
             pickle.dump(pf, fp)
 
-    def list_collects(filepath):
-        pat = '([0-9]{8}_[0-9]{3}_[a-z,A-Z]+[0-9]*_[a-z,A-Z]*[0-9]*[a-z,A-Z]*)'
-        paths = glob.glob(os.path.join(filepath, "*"))
-        collects = [p for p in paths if re.search(pat, p)]
-        non_matching = [p for p in paths if not re.search(pat, p)]
-        if non_matching:
-            print("Non-matching paths:", non_matching)
-        return collects
-
+    @staticmethod
     def list_files(filepath, extensions=[]):
         """
         List all files in a directory (recursively) that match any of the given extensions.
-
-        Args:
-            filepath (str): The root directory to search.
-            extensions (list): List of file extensions to match (e.g., ['.jpg', '.png']).
-
-            list: List of matching file paths.
         """
         paths = []
         for root, dirs, files in os.walk(filepath):
@@ -255,13 +293,20 @@ class Utils:
                 if any(file.lower().endswith(ext.lower()) for ext in extensions):
                     paths.append(os.path.join(root, file))
         return paths
+    
+    @staticmethod
+    def list_subfolders(directory):
+        entries = glob.glob(os.path.join(directory, "*"))
+        return [os.path.abspath(entry) for entry in entries if os.path.isdir(entry)]
 
+    @staticmethod
     def create_empty_txt_files(filename_list, ext=".txt"):
         for fil in filename_list:
             file = fil + f"{ext}"
             with open(file, 'w'):
                 continue
 
+    @staticmethod
     def make_datetime_folder():
         t = datetime.datetime.now()
         timestring = f"{t.year:02d}{t.month:02d}{t.day:02d}-{t.hour:02d}{t.minute:02d}{t.second:02d}"
@@ -272,257 +317,39 @@ class Utils:
         print(out_folder)
         return out_folder, Ymmdd
     
-class demUtils:
     @staticmethod
-    def is_empty(dem_data, nodata):
-        """
-        Function to check if the cleaned DEM data is empty.
-        This function removes NaN values, -9999, 0, and infinite values from the DEM data."""
-        # Remove NaN values, -9999, 0, and infinite values
-        cleaned_data = dem_data[~(np.isnan(dem_data)) & ~(dem_data == nodata) & ~(dem_data == 0) & ~(np.isinf(dem_data))]
-        return cleaned_data.size == 0
+    def natural_sort_key(item, filepath):
+        is_dir = os.path.isdir(os.path.join(filepath, item)) # You'd need a real filepath here
 
-    @staticmethod
-    def is_low_variance(dem_data, nodata, n=2):
-        """
-        Function to check if the number of unique values in the cleaned data array are less than or equal to 2.
+        # Natural sort for the name
+        def natural_sort_parts(s):
+            return [int(text) if text.isdigit() else text.lower()
+                    for text in re.split('([0-9]+)', s)]
 
-        Returns:
-        bool: True if the unique values array length is <= 2, False otherwise.
-        """
-        cleaned_data = dem_data[~(np.isnan(dem_data)) & ~(dem_data == nodata) & ~(dem_data == 0) & ~(np.isinf(dem_data))]
-        return len(np.unique(cleaned_data)) <= n
-
-    @staticmethod
-    def merge_dem(dem_chunks_path, remove=True):
-        """
-        Function to merge DEM files in the specified path using GDAL.
-        Removes the individual DEM tiles after a successful merge.
-        Replaces NaN and infinite values with the nodata value (-9999) and updates the metadata.
-        """
-        dem_name = os.path.basename(dem_chunks_path)
-        
-        # Find all .tif files in the specified path
-        dem_files = glob.glob(os.path.join(dem_chunks_path, "*.tif"))
-        if not dem_files:
-            print(f"No DEM files found in the path: {dem_chunks_path}")
-            return None
-
-        # Create a Virtual Raster (VRT) to mosaic DEM files
-        vrt_options = gdal.BuildVRTOptions(resampleAlg='bilinear')  # Try 'bilinear' or 'cubic' for better alignment
-        vrt_dataset = gdal.BuildVRT('/vsimem/mosaic.vrt', dem_files, options=vrt_options)
-
-        # Define the output file path
-        merged_dem_path = os.path.join(os.path.dirname(dem_chunks_path), f"{dem_name}_merged.tif")
-        # Translate the VRT into a GeoTIFF
-        gdal.Translate(
-            merged_dem_path,
-            vrt_dataset,
-            format='GTiff',
-            creationOptions=['COMPRESS=LZW', 'BIGTIFF=YES']
-        )
-        # Close the VRT dataset
-        vrt_dataset = None
-
-        if remove:
-            # Remove the individual DEM tiles
-            for file in dem_files:
-                os.remove(file)
-            print("Individual DEM tiles have been removed.")
-        print(f"Merged DEM saved at: {merged_dem_path}")
-        return merged_dem_path
+        # Prioritize folders (False for files, True for folders), then apply natural sort
+        return (not is_dir, natural_sort_parts(item))
     
     @staticmethod
-    def merge_dem_arcpy(dem_chunks_path, remove=True):
-        """
-        Function to merge DEM files in the specified path using arcpy.
-        Removes the individual DEM tiles after a successful merge.
-        Replaces NaN and infinite values with the nodata value (-9999) and updates the metadata.
-        """
-        dem_name = os.path.basename(dem_chunks_path)
-        
-        # Find all .tif files in the specified path
-        dem_files = glob.glob(os.path.join(dem_chunks_path, "*.tif"))
-        if not dem_files:
-            print(f"No DEM files found in the path: {dem_chunks_path}")
-            return None
-
-        # Define the output file path
-        merged_dem_path = os.path.join(os.path.dirname(dem_chunks_path), f"{dem_name}_merged.tif")
-
-        # Use arcpy's Mosaic To New Raster tool
-        arcpy.env.overwriteOutput = True
-        arcpy.management.MosaicToNewRaster(
-            input_rasters=dem_files,
-            output_location=os.path.dirname(merged_dem_path),
-            raster_dataset=os.path.basename(merged_dem_path),
-            pixel_type="32_BIT_FLOAT",
-            number_of_bands=1,
-            mosaic_method="MEAN",
-            mosaic_colormap_mode="FIRST"
-        )
-
-        # Optionally remove the individual DEM tiles
-        if remove:
-            for file in dem_files:
-                os.remove(file)
-            print("Individual DEM tiles have been removed.")
-        print(f"Merged DEM saved at: {merged_dem_path}")
-        return merged_dem_path
-
-    @staticmethod
-    def compress_tiff_with_rasterio(dem_path):
-        """
-        Function that replaces nodata values with None, compresses using GDAL BigTIFF, 
-        and compresses the DEM file using LZW compression.
-        Parameters:
-        dem_path (str): Path to the input DEM file.
-        Returns:
-        output_path (str): Path to the compressed DEM file.
-        """
-        # Open the input DEM file
-        with rasterio.open(dem_path) as src:
-            metadata = src.meta.copy()  # Copy metadata
-            metadata.update({
-                'dtype': 'float32',
-                'compress': 'LZW',
-                'nodata': None,  # Set no-data value to None (no explicit nodata)
-                'driver': 'GTiff',
-                'BIGTIFF': 'YES'
-            })
-
-            # Define output file path
-            output_path = os.path.join(os.path.dirname(dem_path), os.path.basename(dem_path).split(".")[0] + "_compressed.tif")
-
-            # Write the modified DEM to a new file in chunks
-            with rasterio.open(output_path, 'w', **metadata) as dst:
-                for ji, window in src.block_windows(1):  # Process by blocks
-                    dem_data = src.read(1, window=window)
-                    dem_data = np.where(np.isnan(dem_data) | np.isinf(dem_data) | (dem_data <= -9999), None, dem_data)
-                    dst.write(dem_data.astype('float32'), 1, window=window)
-        print(f"Reduced and compressed DEM saved to {output_path}")
-        return output_path
-
-    @staticmethod
-    def compress_tiff_with_gdal(input_dem_path, out_dem_folder, compress=True):
-        """
-        Convert a TIFF file to a GDAL raster TIFF using gdal_translate.
-        
-        :param input_dem_path: Path to the input TIFF file.
-        :param output_tiff: Path to save the output raster TIFF file.
-        """
-        # Open the input TIFF file
-        src_ds = gdal.Open(input_dem_path)
-        dem_name = Utils().sanitize_path_to_name(input_dem_path)
-        output_tiff = os.path.join(out_dem_folder, dem_name+"_gdal.tif")
-        # Use gdal_translate to convert the file
-        if compress:
-            gdal.Translate(output_tiff, src_ds, format='GTiff', creationOptions=['COMPRESS=LZW', 'BIGTIFF=YES'], outputType=gdal.GDT_Float32)
-        else:
-            gdal.Translate(output_tiff, src_ds, format='GTiff', outputType=gdal.GDT_Float32)
-        # Remove the original input TIFF file
-        gdal.Dataset.__swig_destroy__(src_ds)  # Close the dataset
-        del src_ds  # Delete the dataset reference
-        os.remove(input_dem_path)
-        print(f"Converted {input_dem_path} to {output_tiff} with compression={compress} as GDAL raster TIFF.")
-        return output_tiff
+    def natural_sort(filepath):
+        file_list = [
+            f for f in os.listdir(filepath)
+            if f.endswith('.tif') and not f.endswith('.tif.ovr') and not f.endswith('.tif.aux.xml')
+        ]
+        return sorted(file_list, key=lambda item: Utils.natural_sort_key(item, filepath))
     
     @staticmethod
-    def compress_tiff_with_arcpy(input_raster_path, format="TIFF", overwrite=True):
-        """
-        Compress a large TIFF file using arcpy, reducing file size without changing spatial reference.
-
-        :param input_dem_path: Path to the input TIFF file.
-        :param out_dem_folder: Folder to save the compressed TIFF file.
-        :param format: options: TIFF —TIFF format
-                                COG —Cloud Optimized GeoTIFF format
-                                IMAGINE Image —ERDAS IMAGINE
-                                BMP —BMP format
-                                GIF —GIF format
-                                PNG —PNG format
-                                JPEG —JPEG format
-                                JP2 —JPEG 2000 format
-                                GRID —Esri Grid format
-                                BIL —Esri BIL format
-                                BSQ —Esri BSQ format
-                                BIP —Esri BIP format
-                                ENVI —ENVI format
-                                CRF —CRF format
-                                MRF —MRF format
-        :return: Path to the compressed TIFF file.
-        """
-
-        raster_name = Utils().sanitize_path_to_name(input_raster_path)
-        ext = format.lower()
-        out_raster_folder = os.path.dirname(input_raster_path)
-        clean_input_raster_path = os.path.join(out_raster_folder, raster_name + ext)
-        output_raster = os.path.join(out_raster_folder, raster_name + "_arcpy." + ext)
-        print(f"Compressing {input_raster_path} to {output_raster} with format={format} using arcpy.")
-        arcpy.env.overwriteOutput = True
-        arcpy.management.CopyRaster(
-            in_raster=input_raster_path,
-            out_rasterdataset=output_raster,
-            background_value="",
-            nodata_value="",
-            onebit_to_eightbit="NONE",
-            colormap_to_RGB="NONE",
-            pixel_type="32_BIT_FLOAT",
-            scale_pixel_value="NONE",
-            RGB_to_Colormap="NONE",
-            format="COG",
-            transform="NONE"
-        )
-
-        print(f"Compression using arcpy complete.")
-        # If overwrite=True, replace the original file after saving
-        if overwrite:
-            try:
-                # Release ArcPy raster references
-                import gc # Imports the garbage collection module, which provides access to the Python garbage collector.
-                gc.collect() # Explicitly runs garbage collection to free up unreferenced memory objects.
-                # Use ArcPy to delete the original raster (handles locks better than os.remove)
-                if arcpy.Exists(input_raster_path):
-                    arcpy.Delete_management(input_raster_path)
-                # Now rename the trimmed raster to the original path
-                os.rename(output_raster, clean_input_raster_path)
-                print(f"Original raster overwritten: {clean_input_raster_path}")
-                return clean_input_raster_path
-            except Exception as e:
-                print(f"Failed to overwrite original raster: {e}")
-                return output_raster
-        else:
-            return output_raster
-
-    @staticmethod
-    def replace_nodata_with_nan(dem_data, nodata=-9999):
-        """
-        Replace no-data values in the DEM data with NaN.
-        """
-        # Replace no-data values with NaN
-        dem_data = np.where(dem_data == nodata, np.nan, dem_data)
-        return dem_data
-
-    @staticmethod
-    def fill_nodata(dem_data, nodata=-9999, max_iterations=10, initial_window_size=3):
-        """
-        Fill no-data values in the DEM data with the mean of the surrounding values.
-
-        Returns:
-        numpy.ndarray: DEM data with no-data gaps filled.
-        """
-        # Create a mask for no-data values
-        mask = np.where(dem_data == nodata, True, False)
-        window_size = initial_window_size
-        for iteration in range(max_iterations):
-            if not np.any(mask):
-                break  # Exit if no gaps remain
-
-            # Fill no-data values with the mean of surrounding values
-            filled_data = ndimage.generic_filter(
-                dem_data, np.nanmean, size=window_size, mode='nearest', output=np.float32)
-            dem_data[mask] = filled_data[mask]
-            # Update the mask for remaining no-data values
-            mask = np.where(dem_data == nodata, True, False)
-            # Optionally increase the window size for subsequent iterations
-            window_size += 2
-        return dem_data
+    def sharepoint_exact_sort_key(filename):
+        # Pattern to extract the two numbers and left-pad the second number with zeros
+        # to ensure it is always two digits.
+        # and lexographically sort by the combined key
+        # Example filename: "tile-123-4.tif" should become "12340"
+        match = re.search(r'tile+-(\d+)-(\d+)\.tif$', filename)
+        if match:
+            group1_int = int(match.group(1)) # Convert to int
+            group2_int = int(match.group(2).ljust(2,'0')) # Convert to int
+            padded_key = f"{group1_int}{group2_int}"
+            return padded_key
+    # example usage
+    # file_list = os.listdir("path/to/your/directory")  # Replace with your directory path
+    # sorted_files = sorted(file_list, key=sharepoint_exact_sort_key)
+    # sorted_files

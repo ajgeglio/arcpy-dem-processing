@@ -5,6 +5,7 @@
 # pip uninstall lxml
 # pip install --upgrade lxml
 # conda env update -f arcpy3.4.yml
+# Note that arcpy comes with its own version of GDAl and trying to override with a different version can cause issues
 name: arcpy3.4
 channels:
   - conda-forge

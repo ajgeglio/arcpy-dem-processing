@@ -1,6 +1,6 @@
-# Arcpy3.4 Raster DEM Processing
+# USGS Northern Lake Michigan Reefs Processing
 
-This repository contains scripts and tools for processing, analyzing, and visualizing data related to digital elevation models. The project focuses on the identification, mapping, and assessment of reef habitats in the northern part of Lake Michigan using various geospatial and analytical techniques.
+This repository contains scripts and tools for processing, analyzing, and visualizing data related to the USGS Northern Lake Michigan Reefs project. The project focuses on the identification, mapping, and assessment of reef habitats in the northern part of Lake Michigan using various geospatial and analytical techniques.
 
 ## Table of Contents
 

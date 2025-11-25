@@ -102,7 +102,6 @@ class Landforms:
             return None
 
         out_geomorphon_landforms.save(raw_geomorphon_output_path)
-        # final_output_raster_path = rasterUtils.con_fill(self.input_dem, raw_geomorphon_output_path)
         final_output_raster_path = raw_geomorphon_output_path
 
         if Raster(raw_geomorphon_output_path) is None:
@@ -295,8 +294,11 @@ class Landforms:
     def generate_landforms(self):
         
         landforms = Landforms(self.input_dem)
-        landforms.calculate_geomorphon_landforms()
-
+        output_raster_path = landforms.calculate_geomorphon_landforms()
+        if output_raster_path is None:
+            print("Failed to calculate geomorphon landforms.")
+            return
+        raster_directory = os.path.dirname(output_raster_path)
         # # calculate the 10class solution
         output_file10c = landforms.classify_bathymorphons(classes="10c")
         print(f"Modified raster data saved to {output_file10c}")
@@ -312,6 +314,8 @@ class Landforms:
         # # calculate the 4class solution
         output_file4c = landforms.classify_bathymorphons(classes="4c")
         print(f"Modified raster data saved to {output_file4c}")
+        
+        return raster_directory
     
 # example usage
 if __name__ == "__main__":

@@ -4,7 +4,13 @@ import pandas as pd
 import pyproj
 from arcpy.sa import *
 from osgeo import gdal, osr
+osr.DontUseExceptions()  # or osr.UseExceptions() if you prefer exception-based error handling
+from shapely import LineString
 from utils import Utils
+from shapely.geometry import LineString, Point, Polygon
+import geopandas as gpd
+from datetime import datetime
+
 
 class GetExtents:
     def __init__(self) -> None:
@@ -63,6 +69,25 @@ class GetExtents:
         return transform.TransformPoint(miny,minx)[0:2], transform.TransformPoint(maxy,maxx)[0:2]
     
     @staticmethod
+    def segment_by_time(df, time_col="UTC", time_format="%Y-%m-%d %H:%M:%S.%f", threshold_seconds=240):
+        df["timestamp"] = pd.to_datetime(df[time_col], format=time_format)
+        segments = []
+        current_segment = [df.iloc[0]]
+
+        for i in range(1, len(df)):
+            delta = (df.iloc[i]["timestamp"] - df.iloc[i - 1]["timestamp"]).total_seconds()
+            if delta > threshold_seconds:
+                segments.append(pd.DataFrame(current_segment))
+                current_segment = [df.iloc[i]]
+            else:
+                current_segment.append(df.iloc[i])
+
+        if current_segment:
+            segments.append(pd.DataFrame(current_segment))
+
+        return segments
+    
+    @staticmethod
     def convert_tracklines_to_lat_lon(xyd_file, from_wkt, wgs84_wkt):
     
         with open(from_wkt) as f:
@@ -78,7 +103,7 @@ class GetExtents:
         # create a transform object to convert between coordinate systems
         # get the GeoTransform parameters from the WKT files
         transform = osr.CoordinateTransformation(old_cs, new_cs)
-        gt = [0, 1, 0, 0, 0, -1]  # Assuming a simple identity transform for this example
+        gt = [0, 1, 0, 0, 0, 1]  # Assuming a simple identity transform for this example
         
         # convert the coordinates in xyd_file.X, xyd_file.Y to lat long
         lat_lon_coords = []
@@ -89,11 +114,120 @@ class GetExtents:
             x_geo = gt[0] + x * gt[1] + y * gt[2]
             y_geo = gt[3] + x * gt[4] + y * gt[5]
             # Transform the coordinates to the new projection
-            lat, lon, _ = transform.TransformPoint(x_geo, y_geo)
-            lat_lon_coords.append((lon, -lat))
+            lon, lat, _ = transform.TransformPoint(x_geo, y_geo)
+            lat_lon_coords.append((lon, lat))
         
         return lat_lon_coords
     
+    @staticmethod
+    def create_tracklines(trackline_folder, out_folder, utm_zone=16):
+        tracklines_files = glob.glob(os.path.join(trackline_folder, "*.txt"))
+        if not tracklines_files:
+            print(f"No .txt files found in {trackline_folder}")
+            return
+
+        reef_name = os.path.basename(trackline_folder)
+        print(f"Creating tracklines shapefile for: {reef_name}")
+        
+        output_shapefile_folder = os.path.join(out_folder, reef_name)
+        os.makedirs(output_shapefile_folder, exist_ok=True)
+        output_shapefile = os.path.join(output_shapefile_folder, f"{reef_name}.shp")
+
+        # List to store data for the GeoDataFrame
+        features_data = []
+        
+        # Determine CRS strategy based on the first file
+        # We assume all files in the folder are in the same coordinate system
+        first_df = pd.read_csv(tracklines_files[0], delimiter=',', header=None)
+        first_df.columns = ["UTC", "X", "Y", "Delta"]
+        crs = GetExtents.infer_xyz_coordinate_system(first_df, sample_size=100, utm_zone=utm_zone)
+        print(f"Inferred CRS: {crs}")
+
+        # Iterate through every file individually
+        for file_path in tracklines_files:
+            try:
+                # Read specific file
+                df = pd.read_csv(file_path, delimiter=',', header=None)
+                # Handle cases where file might be empty or malformed
+                if df.empty or len(df.columns) < 3:
+                    print(f"Skipping empty or malformed file: {os.path.basename(file_path)}")
+                    continue
+                    
+                df.columns = ["UTC", "X", "Y", "Delta"]
+
+                # Convert coordinates to lat/lon
+                xy = []
+                if crs and crs.coordinate_system.name.lower() == "cartesian" and crs.to_proj4().startswith("+proj=utm"):
+                    # Note: Ensure these WKT paths exist relative to your execution directory
+                    xy = GetExtents.convert_tracklines_to_lat_lon(
+                        df, 
+                        from_wkt="..\\projections\\nad83_16N_OGC_WKT.txt", 
+                        wgs84_wkt="..\\projections\\wgs84_OGC_WKT.txt"
+                    )
+                else:
+                    # Assumes Geographic or fallback
+                    xy = [(lon, lat) for lon, lat in zip(df['X'], df['Y'])]
+
+                # Filter out invalid coordinates
+                xy = [(x, y) for x, y in xy if pd.notnull(x) and pd.notnull(y) and np.isfinite(x) and np.isfinite(y)]
+
+                # Create LineString if we have enough points
+                if len(xy) >= 2:
+                    line_geom = LineString(xy)
+                    # Append dictionary with geometry and attributes (Filename)
+                    features_data.append({
+                        'geometry': line_geom,
+                        'filename': os.path.basename(file_path)
+                    })
+                else:
+                    print(f"Not enough valid points in {os.path.basename(file_path)}")
+
+            except Exception as e:
+                print(f"Error processing file {os.path.basename(file_path)}: {e}")
+                continue
+
+        if not features_data:
+            raise ValueError("No valid tracklines generated.")
+
+        # Create GeoDataFrame
+        gdf = gpd.GeoDataFrame(features_data, crs="EPSG:4326")
+        
+        # Save to shapefile
+        gdf.to_file(output_shapefile)
+        print(f"Saved {len(gdf)} tracklines to {output_shapefile}")
+    
+    @staticmethod
+    def infer_xyz_coordinate_system(df, sample_size=100, utm_zone=16):
+        """
+        Infers the coordinate system of a DataFrame with columns: UTC, X, Y, Delta.
+        Assumes X and Y are either lat/lon or projected coordinates.
+        """
+        try:
+            x_vals = df["X"].head(sample_size)
+            y_vals = df["Y"].head(sample_size)
+
+            # Heuristic: if values look like lat/lon
+            if x_vals.between(-180, 180).all() and y_vals.between(-90, 90).all():
+                return pyproj.CRS("EPSG:4326")  # WGS84 Geographic
+
+            # Heuristic: if values look like UTM (easting/northing in meters)
+            if x_vals.min() > 100000 and x_vals.max() < 1000000 and y_vals.min() > 0:
+                # These are likely UTM coordinates
+                # Use a fixed zone if known, or estimate from metadata
+                utm_zone = utm_zone  # most common is 16
+                northern = y_vals.mean() > 0
+                hemisphere = "" if northern else "+south"
+                proj_str = f"+proj=utm +zone={utm_zone} {hemisphere} +datum=NAD83 +units=m +no_defs"
+                return pyproj.CRS(proj_str)
+
+            # Fallback
+            return pyproj.CRS("EPSG:3857")  # Web Mercator
+
+        except Exception as e:
+            print(f"Could not infer CRS: {e}")
+            return None
+
+        
     @staticmethod
     def get_tif_coordinate_system(tif_file):
         # Function to get the coordinate system of the tif file
@@ -102,39 +236,6 @@ class GetExtents:
         srs = osr.SpatialReference()
         srs.ImportFromWkt(proj_wkt)
         return srs
-
-    @staticmethod
-    def infer_xyz_coordinate_system(xyz_file, sample_size=1000):
-        """
-        Infers the coordinate system of an XYZ file by inspecting coordinate ranges.
-        Assumes the file has three columns: X, Y, Z (no header).
-        """
-        try:
-            # Read a sample of the file
-            df = pd.read_csv(xyz_file, delim_whitespace=True, header=None, names=["X", "Y", "Z"], nrows=sample_size)
-            x_vals = df["X"]
-            y_vals = df["Y"]
-
-            # Heuristic: if values look like lat/lon
-            if x_vals.between(-180, 180).all() and y_vals.between(-90, 90).all():
-                return pyproj.CRS("EPSG:4326")  # WGS84 Geographic
-
-            # Heuristic: if values look like UTM (easting/northing in meters)
-            if x_vals.min() > 100000 and x_vals.max() < 1000000 and y_vals.min() > 0:
-                # Estimate UTM zone from mean longitude
-                mean_lon = x_vals.mean()
-                utm_zone = int((mean_lon + 180) / 6) + 1
-                northern = y_vals.mean() > 0
-                hemisphere = "+north" if northern else "+south"
-                proj_str = f"+proj=utm +zone={utm_zone} {hemisphere} +datum=WGS84 +units=m +no_defs"
-                return pyproj.CRS(proj_str)
-
-            # Fallback
-            return pyproj.CRS("EPSG:3857")  # Web Mercator as generic fallback
-
-        except Exception as e:
-            print(f"Could not infer CRS: {e}")
-            return None
 
     @staticmethod
     def return_min_max_tif_df(tif_files=[]):

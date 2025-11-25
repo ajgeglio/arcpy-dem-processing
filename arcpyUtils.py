@@ -1,10 +1,11 @@
 import arcpy
-from arcpy.sa import Raster, SetNull, Con, IsNull
+from arcpy.sa import Raster, SetNull, Con, IsNull, Minus, Times # Make sure 'Minus' and 'Raster' are imported
 import os
 from utils import Utils  # Assuming Utils is defined in src/utils.py
-import numpy as np
-import rasterio
 import shutil
+import time
+import shutil
+import gc
 
 class ArcpyUtils:
 
@@ -16,34 +17,120 @@ class ArcpyUtils:
         If all values are positive, uses rasterio to convert to depth.
         Returns the path to the transformed raster, or the original path if no transformation is needed.
         """
-
+        # Check if the raster exists and is valid
+        if not arcpy.Exists(input_raster_path):
+            raise FileNotFoundError(f"Input raster not found at: {input_raster_path}")
         raster_dir = os.path.dirname(input_raster_path)
         raster_name = Utils.sanitize_path_to_name(input_raster_path)
         output_raster_path = os.path.join(raster_dir, f"{raster_name}_depth.tif")
 
         # Use arcpy to get raster statistics (min/max)
         arcpy.env.overwriteOutput = True
-        min_val = float(arcpy.management.GetRasterProperties(input_raster_path, "MINIMUM").getOutput(0))
+        # --- FIX: Ensure Statistics Exist ---
+        try:
+            # Attempt to read statistics first
+            min_val = float(arcpy.management.GetRasterProperties(input_raster_path, "MINIMUM").getOutput(0))
+        except arcpy.ExecuteError as e:
+            # If statistics are missing (ERROR 001100), generate them
+            if "001100" in str(e):
+                print(f"Statistics missing for {input_raster_path}. Calculating statistics...")
+                
+                # Force calculation of statistics
+                arcpy.management.CalculateStatistics(input_raster_path)
+                
+                # Re-read the statistics after generation
+                min_val = float(arcpy.management.GetRasterProperties(input_raster_path, "MINIMUM").getOutput(0))
+            else:
+                # Re-raise other unexpected ArcPy errors
+                raise
+        # Now, read the maximum value, which should work if min_val succeeded
         max_val = float(arcpy.management.GetRasterProperties(input_raster_path, "MAXIMUM").getOutput(0))
 
         if min_val < 0 and max_val < 0:
             print(f"Warning: Raster values look like depths. Min: {min_val:0.2f}, Max: {max_val:0.2f}. Did not transform from height to depth.")
             return input_raster_path
         else:
-            # Use rasterio to apply the transformation in blocks
+            print("Converting raster using ArcPy Spatial Analyst...")
 
-            with rasterio.open(input_raster_path) as src:
-                profile = src.profile.copy()
-                profile.update({'compress': 'LZW'})
-                with rasterio.open(output_raster_path, 'w', **profile) as dst:
-                    for ji, window in src.block_windows(1):
-                        arr = src.read(1, window=window)
-                        arr = arr.astype(np.float32)
-                        arr = np.where(np.isnan(arr), np.nan, arr)
-                        transformed = (water_elevation - arr) * -1
-                        dst.write(transformed.astype(profile['dtype']), 1, window=window)
+            # 1. Read the input raster
+            in_raster = Raster(input_raster_path)
+            
+            # 2. Perform the calculation (Depth = (Water_Elevation - Height) * -1)
+            # ArcPy handles the NoData implicitly
+            # a. (water_elevation - in_raster) 
+            # b. Times (-1) to invert sign for depth
+            transformed_raster = Minus(water_elevation, in_raster) * -1
+            
+            # 3. Save the output. ArcPy is reliable for creating statistics/pyramids here.
+            transformed_raster.save(output_raster_path)
+            
+            # 4. Cleanup (Remove explicit calls as they are no longer needed)
+            # ArcPy often creates temporary data in the environment when using Raster objects.
+            # You may still want to ensure pyramids/stats are created if the .save() step
+            # doesn't generate them fast enough (though it usually does for SA tools).
+            # For maximum reliability, keep the pyramid/stats lines, but they should now work.
+
+            print("Transform complete. Calculating statistics and building pyramids for ArcPy optimization...")
+            
+            # 1. Calculate Statistics (Keep this line for consistency, but ArcPy may have done it)
+            arcpy.management.CalculateStatistics(output_raster_path)
+            
+            # 2. Build Pyramids (The file is now fully closed and managed by ArcPy)
+            ArcpyUtils.build_pyramids(output_raster_path) # Ensure the positional argument fix is applied here!
+            
             print(f"Transformed raster saved to {output_raster_path}")
             return output_raster_path
+
+    # @staticmethod
+    # def apply_height_to_depth_transformation(input_raster_path, water_elevation=183.6):
+    #     """
+    #     Applies a height to depth transformation on a raster file.
+    #     Uses arcpy to get raster statistics (min/max) to avoid loading large rasters into memory.
+    #     If all values are positive, uses rasterio to convert to depth.
+    #     Returns the path to the transformed raster, or the original path if no transformation is needed.
+    #     """
+
+    #     raster_dir = os.path.dirname(input_raster_path)
+    #     raster_name = Utils.sanitize_path_to_name(input_raster_path)
+    #     output_raster_path = os.path.join(raster_dir, f"{raster_name}_depth.tif")
+
+    #     # Use arcpy to get raster statistics (min/max)
+    #     arcpy.env.overwriteOutput = True
+    #     min_val = float(arcpy.management.GetRasterProperties(input_raster_path, "MINIMUM").getOutput(0))
+    #     max_val = float(arcpy.management.GetRasterProperties(input_raster_path, "MAXIMUM").getOutput(0))
+
+    #     if min_val < 0 and max_val < 0:
+    #         print(f"Warning: Raster values look like depths. Min: {min_val:0.2f}, Max: {max_val:0.2f}. Did not transform from height to depth.")
+    #         return input_raster_path
+    #     else:
+    #         # Use rasterio to apply the transformation in blocks
+
+    #         with rasterio.open(input_raster_path) as src:
+    #             profile = src.profile.copy()
+    #             profile.update({'compress': 'LZW'})
+    #             with rasterio.open(output_raster_path, 'w', **profile) as dst:
+    #                 for ji, window in src.block_windows(1):
+    #                     arr = src.read(1, window=window)
+    #                     arr = arr.astype(np.float32)
+    #                     arr = np.where(np.isnan(arr), np.nan, arr)
+    #                     transformed = (water_elevation - arr) * -1
+    #                     dst.write(transformed.astype(profile['dtype']), 1, window=window)
+    #         # --- START OF FILE LOCK FIX ---
+    #         # Wait a moment for the OS to release the file lock after rasterio closes it
+    #         time.sleep(2)  # 2 seconds is usually sufficient
+    #         # --- END OF FILE LOCK FIX ---
+    #         # --- START OF FIX: Add ArcPy metadata to the new raster ---
+    #         print("Transform complete. Calculating statistics and building pyramids for ArcPy optimization...")
+            
+    #         # 1. Calculate Statistics: Stops "verifying input raster" delay by pre-calculating min/max/mean.
+    #         arcpy.management.CalculateStatistics(output_raster_path)
+            
+    #         # 2. Build Pyramids: Essential for fast rendering and spatial analysis tool checks.
+    #         ArcpyUtils.build_pyramids(output_raster_path) 
+            
+    #         # --- END OF FIX ---
+    #         print(f"Transformed raster saved to {output_raster_path}")
+    #         return output_raster_path
 
     @staticmethod
     def merge_dem_arcpy(dem_chunks_folder, remove_chunks=True):
@@ -504,9 +591,33 @@ class ArcpyUtils:
         resample_technique: Resampling technique to use, e.g., "NEAREST", "BILINEAR", "CUBIC".
         """
         arcpy.management.BuildPyramids(
-            in_raster=raster_file,
+            raster_file,
             pyramid_level=pyramid_level,
             SKIP_FIRST=skip_first,
             resample_technique=resample_technique
         )
         print(f"Pyramids built for {raster_file} with level={pyramid_level}, skip_first={skip_first}, resample_technique={resample_technique}.")
+
+    @staticmethod
+    # Helper function to force delete stubborn folders
+    def cleanup_chunks(folder_path):
+        if not os.path.exists(folder_path):
+            return
+        
+        # 1. Release ArcPy locks
+        arcpy.ClearWorkspaceCache_management()
+        
+        # 2. Force Python garbage collection to release file handles
+        gc.collect()
+        
+        # 3. Try to delete with retries
+        for attempt in range(5):
+            try:
+                shutil.rmtree(folder_path)
+                break # Success
+            except PermissionError:
+                # Wait a moment for the OS to release the file handle
+                time.sleep(1.0) 
+            except Exception as e:
+                print(f"Warning: Could not delete {folder_path}: {e}")
+                break

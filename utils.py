@@ -159,7 +159,7 @@ class WorkspaceCleaner:
             )
         else:
             self.message_length = Utils.print_progress(
-                "Temporary file cleanup process completed WITH ERRORS. Some files/directories may not have been deleted. Please check logs above.",
+                "Temporary file cleanup process completed WITH ERRORS. Some files/directories may not have been deleted. Please check logs above.\n",
                 self.message_length
             )
         return overall_success
@@ -190,6 +190,27 @@ class Utils:
         hours = mins // 60
         mins = mins % 60
         print("Time Lapsed = {0}:{1}:{2}".format(int(hours),int(mins),sec))
+
+    @staticmethod
+    def find_rasters(base_dir, abrv, resolutions, type_marker):
+        """
+        Helper to construct paths and return only those that exist.
+        Assumes folder structure: base_dir \ resolution \ abrv_type_resolution.tif
+        """
+        found_files = []
+        for res in resolutions:
+            # Construct filename: e.g., MP_BY_1m.tif
+            filename = f"{abrv}_{type_marker}_{res}.tif"
+            full_path = os.path.join(base_dir, res, filename)
+            
+            if os.path.exists(full_path):
+                found_files.append(full_path)
+            else:
+                # Optional: Print info if a resolution is expected but missing
+                # print(f"Info: Skipping missing file: {filename}")
+                pass
+                
+        return found_files
 
     @staticmethod
     def print_progress(message, previous_length=0):

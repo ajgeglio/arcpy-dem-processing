@@ -3,7 +3,7 @@ import os
 from arcpy.sa import Con, IsNull, Raster, SetNull
 from arcpy import Extent # Import Extent object for manipulation
 from metafunctions import MetaFunctions
-from utils import Utils # Assuming Utils contains necessary utility functions
+from utils import Utils
 
 class RasterMasking:
     @staticmethod
@@ -37,7 +37,6 @@ class RasterMasking:
         common_extent = None
         first_valid_raster_obj = None
         intersection_mask = None
-
         print("Starting raster processing loop...")
         for raster_path in input_rasters:
             if not arcpy.Exists(raster_path):
@@ -129,6 +128,7 @@ class RasterMasking:
         message = f"Saving intersection mask to: {output_mask_path}"
         message_length = Utils.print_progress(message, previous_length=message_length)
         intersection_mask_final.save(output_mask_path)
+        print()  # Force a newline so the progress bar is "finalized" 
         binary_mask_filled_path = MetaFunctions.fill_mask(output_mask_path)
         binary_mask_filled_object = Raster(binary_mask_filled_path)
         intersection_mask_final = SetNull(binary_mask_filled_object == 0, binary_mask_filled_object)
@@ -137,6 +137,7 @@ class RasterMasking:
         # Clean up environment settings and objects
         arcpy.env.extent = "DEFAULT" # Reset extent
         arcpy.env.snapRaster = ""   # Clear snapRaster
+        print("\nFinished generating intersection mask")
         arcpy.ClearWorkspaceCache_management()
         if 'intersection_mask' in locals() and intersection_mask is not None:
             del intersection_mask

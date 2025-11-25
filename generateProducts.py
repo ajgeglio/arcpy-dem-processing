@@ -1,3 +1,4 @@
+import arcpy
 import argparse
 import sys
 import os
@@ -16,7 +17,7 @@ def main():
     parser = argparse.ArgumentParser(description="Process DEM to generate habitat derivatives.")
     parser.add_argument("--input_dem", type=str, required=True, help="Path to the input DEM file.")
     parser.add_argument("--input_bs", type=str, required=False, help="Path to the input backscatter file.")
-    parser.add_argument("--chunk_size", type=int, default = None, help="Tile size to proocess DEM file.")
+    parser.add_argument("--divisions", type=int, default = None, help="Divide the height by this to run tile processing of DEM file, automatic overalap computed.")
     parser.add_argument("--shannon_window", type=int, default = [3, 9, 21], help="Window size for shannon index.")
     parser.add_argument("--fill_iterations", type=int, default=1, help="Number of iterations for filling voids in the DEM.")
     parser.add_argument("--fill_method", type=str, default=None, choices=["IDW", "FocalStatistics", None], help="Method to fill voids in the DEM, or skip with None.")
@@ -34,7 +35,7 @@ def main():
     # Set default output folder if not provided
     out_folder = args.out_folder
     products = args.products
-    chunk_size = args.chunk_size   
+    divisions = args.divisions   
     shannon_window = args.shannon_window
     fill_method = args.fill_method # IDW, FocalStatistics, None
     fill_iterations = args.fill_iterations
@@ -54,7 +55,7 @@ def main():
                                                 shannon_window=shannon_window,
                                                 fill_iterations=fill_iterations,
                                                 fill_method=fill_method,
-                                                chunk_size=chunk_size,
+                                                divisions=divisions,
                             )
     generateDerivatives.process_dem()
 

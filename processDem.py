@@ -38,7 +38,7 @@ class ProcessDem:
         input_bs=None,
         binary_mask=None,
         use_gdal=True,
-        chunk_size=None,
+        divisions=None,
         output_folder=None,
         shannon_window=None,  # changed default to None
         products=None,
@@ -53,7 +53,7 @@ class ProcessDem:
         input_dem (str): Path to the input DEM file.
         use_gdal (bool): Flag to indicate whether to use GDAL for processing. Default is True.
         use_rasterio (bool): Flag to indicate whether to use Rasterio for processing. Default is False.
-        chunk_size (int or None): Size of chunks for processing large DEMs. Default is None (no chunking).
+        divisions (int or None): Size of chunks for processing large DEMs. Default is None (no chunking).
         output_folder (str): Output folder for results.
         shannon_window (int): Window size for shannon index.
         products (list): List of products to generate.
@@ -67,13 +67,14 @@ class ProcessDem:
         except Exception:
             arcpy.management.CalculateStatistics(self.input_dem)
 
-        depth_dem = ArcpyUtils.apply_height_to_depth_transformation(self.input_dem, water_elevation=183.6)
-        self.input_dem = depth_dem
         self.input_bs = input_bs if input_bs else None
 
         if self.input_dem and self.input_bs:
             assert arcpy.Describe(self.input_dem).spatialReference.name == arcpy.Describe(self.input_bs).spatialReference.name, \
                 "Spatial Ref not matching! You can use the function RasterUtils.transform_spatial_reference_arcpy(base_raster, transform_raster)"
+            
+        # converts to depth if it is in elevation
+        self.input_dem = ArcpyUtils.apply_height_to_depth_transformation(self.input_dem, water_elevation=183.6)
 
         self.dem_name = Utils.sanitize_path_to_name(self.input_dem)
         dem_desc = arcpy.Describe(self.input_dem)
@@ -84,10 +85,12 @@ class ProcessDem:
         # Set arcpy.env variables to match input DEM
         arcpy.env.outputCoordinateSystem = self.original_spatial_ref
         arcpy.env.snapRaster = self.original_snap_raster
+        arcpy.env.extent = dem_desc.extent
         arcpy.env.cellSize = self.original_cell_size
+        print(f"ArcPy environment synchronized to: {self.input_dem}")
         
         self.use_gdal = use_gdal
-        self.chunk_size = chunk_size
+        self.divisions = divisions
         self.output_folder = output_folder
         if self.output_folder is None:
             self.output_folder = os.path.dirname(self.input_dem)
@@ -217,7 +220,7 @@ class ProcessDem:
         arcpy.env.snapRaster = self.original_snap_raster
         arcpy.env.cellSize = self.original_cell_size
 
-        if not self.chunk_size:
+        if not self.divisions:
             with rasterio.open(input_dem) as src:
                 dem_data = src.read(1, masked=True)  # Read the DEM data with masked=True
                 transform = src.transform  # Get the affine transform
@@ -264,28 +267,36 @@ class ProcessDem:
 
 
         # If we are chunking, we need to process each chunk and then merge them
-        elif self.chunk_size:
+        elif self.divisions:
             # --- 1. Create a temporary folder for DEM chunks ---
-            # These are the original DEM split into chunks, which will be processed individually
-            # and then later merged back into a single DEM.
-            dem_chunk_temp_folder = os.path.join(os.path.dirname(self.input_dem), "temp_dem_chunks_for_processing")
+            # Use abspath to ensure we are creating the folder exactly where we think we are
+            dem_dir = os.path.dirname(os.path.abspath(self.input_dem))
+            dem_chunk_temp_folder = os.path.join(dem_dir, "temp_dem_chunks_for_processing")
+         
             if not os.path.exists(dem_chunk_temp_folder):
-                os.makedirs(dem_chunk_temp_folder)
+                try:
+                    os.makedirs(dem_chunk_temp_folder)
+                except OSError as e:
+                    print(f"DEBUG: Failed to create temp folder: {e}")
+                    raise
+
+            # --- 2. Calculate Overlap ---
+            # Calculate required overlap based on max window size to prevent edge effects
+            # Formula: D = floor(W_max / 2). We add +1 for safety.
+            max_filter_size = max(self.shannon_window) if self.shannon_window else 21
+            overlap_px = (max_filter_size // 2) + 1
+            print(f"Applying overlap of {overlap_px} pixels per tile side to prevent edge effects.")
 
             # --- 3. Process each DEM chunk ---
             with rasterio.open(input_dem) as src:
                 # Get the original DEM's properties for later mosaicking of products
-                original_dem_transform = src.transform
                 original_dem_crs = src.crs
-                original_dem_nodata = src.nodata
-                original_dem_height = src.height
-                original_dem_width = src.width
 
                 # Calculate number of tiles in each direction and total tiles
-                tile_size = src.height // self.chunk_size
+                tile_size = max(1, src.height // self.divisions)
                 n_tiles_y = (src.height + tile_size - 1) // tile_size
                 n_tiles_x = (src.width + tile_size - 1) // tile_size
-                n_tiles = n_tiles_y * n_tiles_x
+                total_tiles = n_tiles_y * n_tiles_x
                 tile_counter = 0
 
                 # Set arcpy.env variables before processing each chunk
@@ -296,32 +307,59 @@ class ProcessDem:
                 for i in range(0, src.height, tile_size):
                     for j in range(0, src.width, tile_size):
                         tile_counter += 1
-                        # Read a chunk of the DEM, deals with edge cases when the remaining pixels are smaller than the tile size
-                        window = Window(j, i, min(tile_size, src.width - j), min(tile_size, src.height - i))
-                        chunk_data = src.read(1, window=window)
+                        # A. Define the "Target" Window (The final output size for this tile)
+                        # This determines where the final pixels go in the mosaic
+                        target_width = min(tile_size, src.width - j)
+                        target_height = min(tile_size, src.height - i)
+                        write_window = Window(j, i, target_width, target_height)
+                        
+                        # Calculate the transform for the FINAL output position
+                        write_transform = src.window_transform(write_window)
+
+                        # B. Define the "Read" Window (Target + Overlap)
+                        # Clamp coordinates so we don't go outside the image
+                        read_row_start = max(0, i - overlap_px)
+                        read_col_start = max(0, j - overlap_px)
+                        read_row_stop = min(src.height, i + target_height + overlap_px)
+                        read_col_stop = min(src.width, j + target_width + overlap_px)
+
+                        read_window = Window.from_slices(
+                            (read_row_start, read_row_stop), 
+                            (read_col_start, read_col_stop)
+                        )
+                        
+                        # Calculate offsets: How many pixels did we actually add to the top/left?
+                        # We need this to crop the result later.
+                        pad_top = i - read_row_start
+                        pad_left = j - read_col_start
+
+                        # C. Read and Save the Buffered Chunk
+                        # We perform calculations on the *Expanded* (Buffered) data
+                        chunk_data_padded = src.read(1, window=read_window)
+                        chunk_transform_padded = src.window_transform(read_window)
                         
                         # Define path for the temporary DEM chunk
                         chunk_dem_path = os.path.join(dem_chunk_temp_folder, f"{self.dem_name}_chunk_{i}_{j}.tif")
                         
-                        # Save the DEM chunk to disk (user's workaround)
+                        # Save the PADDED DEM chunk to disk
                         with rasterio.open(
                             chunk_dem_path,
                             'w',
                             driver='GTiff',
-                            height=chunk_data.shape[0],
-                            width=chunk_data.shape[1],
+                            height=chunk_data_padded.shape[0],
+                            width=chunk_data_padded.shape[1],
                             count=1,
-                            dtype=str(chunk_data.dtype),
+                            dtype=str(chunk_data_padded.dtype),
                             crs=original_dem_crs,
-                            transform=original_dem_transform
+                            transform=chunk_transform_padded # Use the padded transform
                         ) as dst:
-                            dst.write(chunk_data, 1)
+                            dst.write(chunk_data_padded, 1)
 
-                        message = message = f"Processing tile {i}/{n_tiles}"
+                        message = f"Processing tile {tile_counter}/{total_tiles} (Overlap: {overlap_px}px)"
                         self.message_length = Utils.print_progress(message, self.message_length)
 
-                        # Process and write each product for the chunk
-                        for data, output_file in generate_products(chunk_dem_path, chunk_data, original_dem_transform):
+                        # D. Generate Products on Padded Data
+                        for data, output_file in generate_products(chunk_dem_path, chunk_data_padded, chunk_transform_padded):
                             # Ensure output folder exists for the product
                             output_dir = os.path.dirname(output_file)
                             product_name = os.path.basename(output_file).split(".")[0]
@@ -344,19 +382,27 @@ class ProcessDem:
                                 arcpy.Delete_management(output_file)
 
                             else:
-                                # # Save the chunk using Rasterio
+                                # E. Crop the Result
+                                # We calculated on the padded area, now we cut out the center "valid" area
+                                # Slicing syntax: [start_row : end_row, start_col : end_col]
+                                cropped_data = data[
+                                    pad_top : pad_top + target_height, 
+                                    pad_left : pad_left + target_width
+                                ]
+
+                                # F. Save the Cropped (Seamless) Chunk
                                 with rasterio.open(
                                     chunk_output_file,
                                     'w',
                                     driver='GTiff',
-                                    height=chunk_data.shape[0],
-                                    width=chunk_data.shape[1],
+                                    height=cropped_data.shape[0],
+                                    width=cropped_data.shape[1],
                                     count=1,
-                                    dtype=data.dtype,
+                                    dtype=cropped_data.dtype,
                                     crs=original_dem_crs,
-                                    transform=original_dem_transform
+                                    transform=write_transform # Use the original TARGET transform
                                 ) as dst:
-                                    dst.write(data, 1)
+                                    dst.write(cropped_data, 1)
                                     dst.update_tags(**src.tags())
 
                             # Assert output spatial reference matches input
@@ -364,19 +410,35 @@ class ProcessDem:
                             assert out_desc.spatialReference.name == self.original_spatial_ref.name, \
                                 f"Spatial reference changed! Expected: {self.original_spatial_ref.name}, Got: {out_desc.spatialReference.name}"
                             
-                # After the chunk processing loop finishes
-                # Merge the tiles and clean up
-                for product_key, output_file in output_files.items(): # Iterate through the dictionary of expected output files
-                    dem_chunks_path = os.path.join(os.path.dirname(output_file), os.path.basename(output_file).split(".")[0])
-                    if os.path.exists(dem_chunks_path): # Ensure the chunk folder exists
-                        merged_dem = RasterUtils.merge_dem_arcpy(dem_chunks_path, self.original_spatial_ref, self.original_cell_size, remove_chunks=False)
-                        # if "shannon" in str(merged_dem).lower() or "lbp" in str(merged_dem).lower():
-                        trimmed_raster_path = self.inpainter.trim_raster(merged_dem, self.binary_mask, overwrite=True)
-                        RasterUtils.compress_tiff_with_arcpy(trimmed_raster_path, format="TIFF", overwrite=True)
-                    else:
-                        print(f"Warning: No chunks found for {product_key} at {dem_chunks_path}. Skipping merge.")
+                # --- 4. Merge and Clean ---
+                print() # Finalize progress bar
 
-            # Reset arcpy.env variables after processing
+                for product_key, output_file in output_files.items(): 
+                    # Determine the folder where chunks are stored
+                    dem_chunks_path = os.path.join(os.path.dirname(output_file), os.path.basename(output_file).split(".")[0])
+                    
+                    if os.path.exists(dem_chunks_path): 
+                        # STEP A: Merge, but DO NOT let the utility delete chunks yet (prevents the crash)
+                        merged_dem = ArcpyUtils.merge_dem_arcpy(dem_chunks_path, remove_chunks=False)
+                        
+                        # STEP B: Post-process the merged result
+                        trimmed_raster_path = self.inpainter.trim_raster(merged_dem, self.binary_mask, overwrite=True)
+                        ArcpyUtils.compress_raster(trimmed_raster_path, format="TIFF", overwrite=True)
+                        
+                        # STEP C: Explicitly release references
+                        del merged_dem 
+                        
+                        # STEP D: Robust cleanup
+                        ArcpyUtils.cleanup_chunks(dem_chunks_path)
+                        Utils.remove_additional_files(directory=os.path.dirname(dem_chunks_path))
+                    else:
+                        print(f"Warning: No chunks found for {product_key}. Skipping merge.")
+
+            # Cleanup the temporary raw DEM chunks folder as well
+            if 'dem_chunk_temp_folder' in locals():
+                ArcpyUtils.cleanup_chunks(dem_chunk_temp_folder)
+
+            # Reset Environment
             arcpy.env.outputCoordinateSystem = self.original_spatial_ref
             arcpy.env.snapRaster = self.original_snap_raster
             arcpy.env.cellSize = self.original_cell_size
@@ -399,7 +461,7 @@ if __name__ == "__main__":
                                     shannon_window=21,
                                     fill_iterations=1,
                                     fill_method=None,  # "IDW" or "FocalStatistics" or None
-                                    chunk_size=32,  # Set to None for no chunking, or specify a chunk size
+                                    divisions=8,  # Set to None for no chunking, or specify a chunk size
                                     )
     habitat_derivatives.process_dem()
 

@@ -490,8 +490,18 @@ class Inpainter:
             temp_integer_raster = os.path.join(self.local_temp, "integer.tif")
             message = "Converting raster to integer type..."
             self.message_length = Utils.print_progress(message, self.message_length)
-            integer_raster = Int(Raster(input_raster))
-            integer_raster.save(temp_integer_raster)
+            # --- FIX START ---
+            # Old Code (Caused the square box issue):
+            # data_mask = arcpy.sa.Con(arcpy.sa.IsNull(self.input_raster), 0, 1)
+            # temp_integer_raster = arcpy.sa.Int(data_mask)
+            
+            # New Code: 
+            # If input is Null, result is Null. If input has data, result is 1.
+            # SetNull(condition, value_if_false) -> If IsNull is true, set to Null. Else 1.
+            data_mask = arcpy.sa.SetNull(arcpy.sa.IsNull(self.input_raster), 1)
+            temp_integer_raster_obj = arcpy.sa.Int(data_mask)
+            temp_integer_raster_obj.save(temp_integer_raster) # Explicit save helps with locks sometimes
+            # --- FIX END ---
 
             # Step 2: Convert the integer raster to polygons
             temp_polygon = os.path.join(self.local_temp, "temp_polygon.shp")

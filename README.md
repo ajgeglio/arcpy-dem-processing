@@ -1,4 +1,4 @@
-# Raster Processing with Arcpy
+# USGS Digital Elevation Model (DEM) Processing
 
 This repository contains scripts and tools for processing, analyzing, and visualizing data related to the USGS Northern Lake Michigan Reefs project. The project focuses on the identification, mapping, and assessment of reef habitats in the northern part of Lake Michigan using various geospatial and analytical techniques.
 
@@ -22,6 +22,38 @@ The goal of this project is to process and analyze geospatial datasets (e.g., ba
 - Spatial analysis and modeling
 - Visualization and mapping
 - Exporting results for further use
+
+## Raster Processing & Product Generation Workflow
+
+We generate a suite of spatial derivative products from the original Digital Elevation Model (DEM) and Backscatter intensity data. These products serve as the statistical basis for substrate classification in multibeam survey analysis. To ensure statistical validity and seamless output, the following processing chain is applied:
+
+<p align="left">
+  <img src="thumb1.png" width="24%" alt="Hillshade"/>
+  <img src="thumb2.png" width="24.6%" alt="Shannon Entropy"/>
+</p>
+<p align="left">
+  <em><strong>Figure 1.</strong> Derived Products of Bay Harbor, Lake Michigan multibeam survey. Hillshade shown on left, and the Shannon entropy texture analysis on the right.</em>
+</p>
+
+### 1. Pre-Processing and Alignment
+*   **Grid Standardization:** All input rasters (including multi-resolution backscatter) are projected and aligned to the 1-meter DEM, which serves as the "Master Snap Raster." This ensures pixel-for-pixel correspondence across all data layers.
+*   **Intersection Masking:** A binary intersection mask is generated to identify the common spatial extent where valid data exists for *all* input layers (DEM + Backscatter). Areas missing data in any single layer are excluded from the final analysis.
+*   **Gap Filling (Inpainting):** Small internal gaps and NoData artifacts within the common extent are inpainted using an iterative Inverse Distance Weighted (IDW) or Focal Statistics approach. This ensures continuous surfaces required for neighborhood-based calculations (like texture metrics) without altering the original data significantly.
+*   **Data Trimming:** All inputs are trimmed to the clean intersection mask, removing noisy edges and ensuring a unified dataset boundary.
+
+### 2. Derivative Calculation & Tiled Processing
+To handle high-resolution datasets efficiently, rasters are segmented into manageable processing tiles (divisions).
+
+*   **Edge Effect Mitigation:** A dynamic overlap buffer calculated as `⌊W_max / 2⌋ + 1` is applied to every tile. This allows neighborhood operations (e.g., Shannon Entropy, Slope) to "see" into the adjacent tile, effectively eliminating seaming artifacts and edge discontinuities in the final output.
+*   **Product Generation:** The following derivatives are calculated for every pixel:
+    *   **Morphometrics:** Slope, Aspect, Roughness, TPI (Topographic Position Index), TRI (Terrain Ruggedness Index), Hillshade.
+    *   **Texture Analysis:** Shannon Entropy (calculated at multiple window sizes, e.g., 3x3, 9x9, 21x21) and Local Binary Patterns (LBP).
+    *   **Bathymorphons:** 10-class, 6-class, 5-class, 4-class, and raw bathymorphons are generated.
+
+### 3. Post-Processing and Quality Assurance
+*   **Seamless Mosaicking:** Processed tiles—minus their overlap buffers—are mathematically merged back into a single continuous raster.
+*   **Artifact Removal:** A final trimming pass is applied using the original binary mask. This removes "halo" artifacts that often appear on the outer edges of texture-derived products (like Shannon Index) due to windowing functions.
+*   **Metadata Validation:** The final products undergo strict validation to ensure they retain the exact spatial reference, cell size, and extent of the original source DEM.
 
 ## Repository Structure
 
@@ -121,5 +153,4 @@ For questions or collaboration, contact:
 - Anthony Geglio (ageglio@mtu.edu)
 - Peter Esselman Advanced Techonology Lab
 - USGS Great Lakes Science Center
-
 - Ann Arbor, MI

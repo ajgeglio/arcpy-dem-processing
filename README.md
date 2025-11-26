@@ -1,4 +1,4 @@
-# USGS Northern Lake Michigan Reefs Processing
+# Raster Processing with Arcpy
 
 This repository contains scripts and tools for processing, analyzing, and visualizing data related to the USGS Northern Lake Michigan Reefs project. The project focuses on the identification, mapping, and assessment of reef habitats in the northern part of Lake Michigan using various geospatial and analytical techniques.
 
@@ -121,4 +121,5 @@ For questions or collaboration, contact:
 - Anthony Geglio (ageglio@mtu.edu)
 - Peter Esselman Advanced Techonology Lab
 - USGS Great Lakes Science Center
+
 - Ann Arbor, MI

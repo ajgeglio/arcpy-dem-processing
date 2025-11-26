@@ -16,22 +16,71 @@ def main():
     # Set up argument parser
     parser = argparse.ArgumentParser(description="Process DEM to generate habitat derivatives.")
     parser.add_argument("--input_dem", type=str, required=True, help="Path to the input DEM file.")
-    parser.add_argument("--input_bs", type=str, required=False, help="Path to the input backscatter file.")
+    parser.add_argument("--input_bs", type=str, required=False, help="Path to the input backscatter file, must contain 'BS' in file name.")
+    parser.add_argument("--input_binary_mask", type=str, required=False, help="Path to the input binary mask file used for boundary control.")
     parser.add_argument("--divisions", type=int, default = None, help="Divide the height by this to run tile processing of DEM file, automatic overalap computed.")
     parser.add_argument("--shannon_window", type=int, default = [3, 9, 21], help="Window size for shannon index.")
     parser.add_argument("--fill_iterations", type=int, default=1, help="Number of iterations for filling voids in the DEM.")
-    parser.add_argument("--fill_method", type=str, default=None, choices=["IDW", "FocalStatistics", None], help="Method to fill voids in the DEM, or skip with None.")
+    parser.add_argument("--fill_method", type=str, default="IDW", choices=["IDW", "FocalStatistics", None], help="Method to fill voids in the DEM, or skip with None.")
     parser.add_argument("--out_folder", type=str, default=None, help="Output folder path for habitat derivatives.")
     parser.add_argument("--products", type=str, nargs="+", default=["slope", "aspect", "roughness", "tpi", "tri", "hillshade", "shannon_index"],
-                        choices=["slope", "aspect", "roughness", "tpi", "tri", "hillshade", "shannon_index", "lbp-3-1", "lbp-15-2", "lbp-21-3", "dem"],
+                        choices=["slope", "aspect", "roughness", "tpi", "tri", "hillshade", "shannon_index", "dem", "lbp-3-1", "lbp-15-2", "lbp-21-3"],
                         metavar="PRODUCTS",
-                        help="List of products to generate (e.g., slope, aspect, roughness, hillshade, shannon_index, lbp-3-1, lbp-15-2, lbp-21-3, dem)")
+                        help="List of products to generate (e.g., slope, aspect, roughness, hillshade, shannon_index, ...)")
     parser.add_argument("--generate_geomorphons", action="store_true", help="Generate geomorphons from the DEM. This will create landforms using ArcGIS Pro's GeomorphonLandforms tool.")
 
     # Parse arguments
     args = parser.parse_args()
-    input_dem = args.input_dem
-    input_bs = args.input_bs if args.input_bs else None  # Optional backscatter input
+    # Define markers used in filenames
+    DEM_MARKER = "BY"  # Bathymetry
+    BS_MARKER = "BS"   # Backscatter
+    INPUT_DEM = args.input_dem
+    INPUT_BS = args.input_bs if args.input_bs else None  # Optional backscatter input
+    BINARY_MASK = args.input_binary_mask if args.input_binary_mask else None  # Optional binary mask input
+    RASTER_DIR = os.path.basename(INPUT_DEM)
+    PRODUCTS = args.products
+    # Basic validation
+    if not INPUT_DEM:
+        raise FileNotFoundError(f"No DEMs found in {RASTER_DIR}")
+
+    if INPUT_BS:
+        print(f"FOUND BACKSCATTER ({INPUT_BS}):")
+        # --- 2. Combine for Processing ---
+        # Combine lists. DEMs first ensures the highest res DEM is the primary snap raster
+        input_rasters_list = [INPUT_DEM, INPUT_BS]
+    else:
+        print("NO BACKSCATTER FILES FOUND. Proceeding with DEMs only.")
+        input_rasters_list = [INPUT_DEM]
+
+    print(f"PRODUCTS: {PRODUCTS}")
+
+
+    # # --- 5. Final Validation ---
+    # print("-" * 30)
+    # print("PROCESSING COMPLETE")
+    # print(f"Aligned DEMs: {len(aligned_dem)}")
+    # print(f"Aligned BS:   {len(aligned_bs)}")
+
+    # --- 6. Cleanup ---
+    print("-" * 30)
+    print("STARTING CLEANUP")
+
+    # Collect all files involved (Inputs, Aligned Outputs, and the Mask)
+    all_involved_files = input_rasters_list
+    if BINARY_MASK:
+        all_involved_files.append(BINARY_MASK)
+
+    # Extract unique directories using a set comprehension
+    # This prevents trying to clean the same folder multiple times
+    cleanup_dirs = {os.path.dirname(f) for f in all_involved_files if f and os.path.exists(os.path.dirname(f))}
+
+    # Iterate and clean
+    for directory in cleanup_dirs:
+        # Optional: Print where we are cleaning
+        Utils.remove_additional_files(directory=directory)
+
+    print("Cleanup Complete.")
+
     # Set default output folder if not provided
     out_folder = args.out_folder
     products = args.products
@@ -41,45 +90,32 @@ def main():
     fill_iterations = args.fill_iterations
     # Validate input arguments
 
-    print("ORIGINAL PATH:", input_dem)
+    print("ORIGINAL PATH:", INPUT_DEM)
     print("PRODUCTS:", products)
     print()
-    print(GetExtents.return_min_max_tif_df([input_dem]))
+    print(GetExtents.return_min_max_tif_df([INPUT_DEM]))
     print()
     # Create an instance of the HabitatDerivatives class with the specified parameters
     generateDerivatives = ProcessDem(
-                                                input_dem=input_dem, 
-                                                input_bs=input_bs,
-                                                output_folder=out_folder,
-                                                products=products,
-                                                shannon_window=shannon_window,
-                                                fill_iterations=fill_iterations,
-                                                fill_method=fill_method,
-                                                divisions=divisions,
+                                    input_dem=INPUT_DEM, 
+                                    input_bs=INPUT_BS,
+                                    binary_mask=BINARY_MASK,
+                                    output_folder=out_folder,
+                                    products=products,
+                                    shannon_window=shannon_window,
+                                    fill_iterations=fill_iterations,
+                                    fill_method=fill_method,
+                                    divisions=divisions,
                             )
     generateDerivatives.process_dem()
 
     if args.generate_geomorphons:
-        filled_dem = os.path.join(os.path.dirname(input_dem), "filled", Utils.sanitize_path_to_name(input_dem) + "_filled.tif")
         # create original landforms from ArcGIS Pro
-        landforms = Landforms(filled_dem)
-        landforms.calculate_geomorphon_landforms()
-
-        # calculate the 10class solution
-        output_file10c = landforms.classify_bathymorphons(classes="10c")
-        print(f"Modified raster data saved to {output_file10c}")
-
-        # calculate the 6class solution
-        output_file6c = landforms.classify_bathymorphons(classes="6c")
-        print(f"Modified raster data saved to {output_file6c}")
-
-        # calculate the 5class solution
-        output_file5c = landforms.classify_bathymorphons(classes="5c")
-        print(f"Modified raster data saved to {output_file5c}")
-
-        # calculate the 4class solution
-        output_file4c = landforms.classify_bathymorphons(classes="4c")
-        print(f"Modified raster data saved to {output_file4c}")
+        filled_dem = os.path.join(os.path.dirname(args.input_dem), "filled", f"*{DEM_MARKER}*.tif")
+        print("creating landforms for:", os.path.basename(filled_dem))
+        landofrms_directory = Landforms(filled_dem).generate_landforms()
+        # Clean up additional files after processing
+        Utils.remove_additional_files(directory=landofrms_directory)
 
     print("Processing completed successfully.")
 

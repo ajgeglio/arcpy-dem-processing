@@ -120,13 +120,14 @@ class ProcessDem:
 
         # Initialize inpainter and binary mask according to the input parameters
         if self.input_dem and self.input_bs and self.binary_mask:
+            # if all are input, we assume they are aligned, and the mask is already an intersection mask
             aligned_dem = self.input_dem
             aligned_bs = self.input_bs
-            trimmed_dem_path, inpainter = MetaFunctions.trim_with_intersection_mask(aligned_dem, aligned_bs, self.binary_mask, fill_method, fill_iterations)
+            trimmed_dem_path, inpainter = MetaFunctions.fill_trim_with_intersection_mask(aligned_dem, aligned_bs, self.binary_mask, fill_method, fill_iterations)
 
         if self.input_dem and self.input_bs and not self.binary_mask:
             aligned_bs_path = ArcpyUtils.align_rasters(self.input_dem, self.input_bs)
-            trimmed_dem_path, intersection_mask, inpainter = MetaFunctions.trim_make_intersection_mask(self.input_dem, aligned_bs_path, fill_method, fill_iterations)
+            trimmed_dem_path, intersection_mask, inpainter = MetaFunctions.fill_trim_make_intersection_mask(self.input_dem, aligned_bs_path, fill_method, fill_iterations)
             self.binary_mask = intersection_mask
 
         elif self.input_dem and not self.input_bs and not self.binary_mask:

@@ -5,7 +5,7 @@ import arcpy
 
 class MetaFunctions():
     @staticmethod
-    def trim_with_intersection_mask(aligned_input_dem, aligned_input_bs, intersection_mask, fill_method="IDW", fill_iterations=1):
+    def fill_trim_with_intersection_mask(aligned_input_dem, aligned_input_bs, intersection_mask, fill_method="IDW", fill_iterations=1):
         """
         Generate a binary intersection mask by multiplying the valid data masks of two rasters.
         Returns the path to the intersection mask raster.
@@ -33,6 +33,8 @@ class MetaFunctions():
             )
             WorkspaceCleaner(inpainterbs).clean_up()
         else:
+            print("Fill method NONE, returning aligned rasters and trimming to binary mask boundary provided")
+            filled_dem_path, filled_bs_path = aligned_input_dem, aligned_input_bs
             WorkspaceCleaner(inpainter).clean_up()
             WorkspaceCleaner(inpainterbs).clean_up()
         # Trim the rasters to the intersection mask
@@ -41,7 +43,7 @@ class MetaFunctions():
         return trimmed_dem_path, inpainter
 
     @staticmethod
-    def trim_make_intersection_mask(input_dem, input_bs, fill_method, fill_iterations):
+    def fill_trim_make_intersection_mask(input_dem, input_bs, fill_method, fill_iterations):
         """
         Generate a binary intersection mask by multiplying the valid data masks of two rasters.
         Returns the path to the intersection mask raster.

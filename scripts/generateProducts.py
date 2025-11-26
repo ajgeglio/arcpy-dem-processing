@@ -20,9 +20,8 @@ def main():
     parser.add_argument("--input_binary_mask", type=str, required=False, help="Path to the input binary mask file used for boundary control.")
     parser.add_argument("--divisions", type=int, default = None, help="Divide the height by this to run tile processing of DEM file, automatic overalap computed.")
     parser.add_argument("--shannon_window", type=int, default = [3, 9, 21], help="Window size for shannon index.")
+    parser.add_argument("--fill_method", type=str, default="IDW", choices=["IDW", "FocalStatistics", "NoFill"], help="Method to fill voids in the DEM, or skip with None.")
     parser.add_argument("--fill_iterations", type=int, default=1, help="Number of iterations for filling voids in the DEM.")
-    parser.add_argument("--fill_method", type=str, default="IDW", choices=["IDW", "FocalStatistics", None], help="Method to fill voids in the DEM, or skip with None.")
-    parser.add_argument("--out_folder", type=str, default=None, help="Output folder path for habitat derivatives.")
     parser.add_argument("--products", type=str, nargs="+", default=["slope", "aspect", "roughness", "tpi", "tri", "hillshade", "shannon_index"],
                         choices=["slope", "aspect", "roughness", "tpi", "tri", "hillshade", "shannon_index", "dem", "lbp-3-1", "lbp-15-2", "lbp-21-3"],
                         metavar="PRODUCTS",
@@ -82,11 +81,12 @@ def main():
     print("Cleanup Complete.")
 
     # Set default output folder if not provided
-    out_folder = args.out_folder
     products = args.products
     divisions = args.divisions   
     shannon_window = args.shannon_window
     fill_method = args.fill_method # IDW, FocalStatistics, None
+    if fill_method == "NoFill":
+        fill_method = None
     fill_iterations = args.fill_iterations
     # Validate input arguments
 
@@ -100,11 +100,11 @@ def main():
                                     input_dem=INPUT_DEM, 
                                     input_bs=INPUT_BS,
                                     binary_mask=BINARY_MASK,
-                                    output_folder=out_folder,
+                                    output_folder=RASTER_DIR,
                                     products=products,
                                     shannon_window=shannon_window,
-                                    fill_iterations=fill_iterations,
                                     fill_method=fill_method,
+                                    fill_iterations=fill_iterations,
                                     divisions=divisions,
                             )
     generateDerivatives.process_dem()

@@ -31,12 +31,12 @@ def main():
     # Parse arguments
     args = parser.parse_args()
     # Define markers used in filenames
-    DEM_MARKER = "BY"  # Bathymetry
+    BATHY_MARKER = "BY"  # Bathymetry
     BS_MARKER = "BS"   # Backscatter
     INPUT_DEM = args.input_dem
     INPUT_BS = args.input_bs if args.input_bs else None  # Optional backscatter input
     BINARY_MASK = args.input_binary_mask if args.input_binary_mask else None  # Optional binary mask input
-    RASTER_DIR = os.path.basename(INPUT_DEM)
+    RASTER_DIR = os.path.dirname(os.path.abspath(INPUT_DEM))  # Directory of the input DEM
     PRODUCTS = args.products
     # Basic validation
     if not INPUT_DEM:
@@ -52,13 +52,6 @@ def main():
         input_rasters_list = [INPUT_DEM]
 
     print(f"PRODUCTS: {PRODUCTS}")
-
-
-    # # --- 5. Final Validation ---
-    # print("-" * 30)
-    # print("PROCESSING COMPLETE")
-    # print(f"Aligned DEMs: {len(aligned_dem)}")
-    # print(f"Aligned BS:   {len(aligned_bs)}")
 
     # --- 6. Cleanup ---
     print("-" * 30)
@@ -93,27 +86,31 @@ def main():
     print("ORIGINAL PATH:", INPUT_DEM)
     print("PRODUCTS:", products)
     print()
+    GetExtents.return_min_max_tif_df([INPUT_DEM])
     print(GetExtents.return_min_max_tif_df([INPUT_DEM]))
     print()
     # Create an instance of the HabitatDerivatives class with the specified parameters
     generateDerivatives = ProcessDem(
-                                    input_dem=INPUT_DEM, 
-                                    input_bs=INPUT_BS,
-                                    binary_mask=BINARY_MASK,
-                                    output_folder=RASTER_DIR,
-                                    products=products,
-                                    shannon_window=shannon_window,
-                                    fill_method=fill_method,
-                                    fill_iterations=fill_iterations,
-                                    divisions=divisions,
+                            input_dem=INPUT_DEM, 
+                            input_bs=INPUT_BS,
+                            binary_mask=BINARY_MASK,
+                            output_folder=RASTER_DIR,
+                            products=products,
+                            shannon_window=shannon_window,
+                            fill_method=fill_method,
+                            fill_iterations=fill_iterations,
+                            divisions=divisions,
                             )
     generateDerivatives.process_dem()
 
     if args.generate_geomorphons:
         # create original landforms from ArcGIS Pro
-        filled_dem = os.path.join(os.path.dirname(args.input_dem), "filled", f"*{DEM_MARKER}*.tif")
-        print("creating landforms for:", os.path.basename(filled_dem))
-        landofrms_directory = Landforms(filled_dem).generate_landforms()
+        if fill_method == "NoFill":
+            base_dem = args.input_dem
+        else:
+            base_dem = os.path.join(os.path.dirname(args.input_dem), "filled", f"*{BATHY_MARKER}*.tif")
+        print("creating landforms for:", os.path.basename(base_dem))
+        landofrms_directory = Landforms(base_dem).generate_landforms()
         # Clean up additional files after processing
         Utils.remove_additional_files(directory=landofrms_directory)
 

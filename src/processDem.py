@@ -5,6 +5,7 @@ from arcpy.sa import *
 from utils import Utils
 from arcpyUtils import ArcpyUtils
 from rasterUtils import RasterUtils
+from gdalUtils import GdalUtils
 from metafunctions import MetaFunctions
 from inpainter import *
 import time
@@ -42,8 +43,8 @@ class ProcessDem:
         output_folder=None,
         shannon_window=None,  # changed default to None
         products=None,
-        fill_iterations=1,
         fill_method=None,
+        fill_iterations=1,
         generate_boundary=True
     ):
         """
@@ -120,19 +121,30 @@ class ProcessDem:
 
         # Initialize inpainter and binary mask according to the input parameters
         if self.input_dem and self.input_bs and self.binary_mask:
-            # if all are input, we assume they are aligned, and the mask is already an intersection mask
+            print("Filling input rasters and using input binary mask to trim boundaries, assumed alignment")
             aligned_dem = self.input_dem
             aligned_bs = self.input_bs
             trimmed_dem_path, inpainter = MetaFunctions.fill_trim_with_intersection_mask(aligned_dem, aligned_bs, self.binary_mask, fill_method, fill_iterations)
 
-        if self.input_dem and self.input_bs and not self.binary_mask:
+        elif self.input_dem and self.input_bs and not self.binary_mask:
+            print("Aligning dem and backscatter and then filling input raster, then generating boundaries and mask, and trimming rasters to binary mask")
             aligned_bs_path = ArcpyUtils.align_rasters(self.input_dem, self.input_bs)
             trimmed_dem_path, intersection_mask, inpainter = MetaFunctions.fill_trim_make_intersection_mask(self.input_dem, aligned_bs_path, fill_method, fill_iterations)
             self.binary_mask = intersection_mask
 
         elif self.input_dem and not self.input_bs and not self.binary_mask:
-            trimmed_dem_path, inpainter, binary_mask  = MetaFunctions.fill_and_return_mask(self.input_dem, fill_method, fill_iterations, generate_boundary)
-            self.binary_mask = binary_mask
+            if fill_method is not None:
+                trimmed_dem_path, binary_mask, inpainter = MetaFunctions.fill_and_return_mask(self.input_dem, fill_method, fill_iterations, generate_boundary)
+            if fill_method is None:
+                print("Generating the binary mask from the inpur raster, no filling")
+                trimmed_dem_path = self.input_dem
+                self.binary_mask = ArcpyUtils.create_binary_mask(trimmed_dem_path, data_value=1, nodata_value=0)
+                inpainter = Inpainter(trimmed_dem_path)
+
+        elif self.input_dem and not self.input_bs and self.binary_mask:
+            print("Using input raster and binary mask, without filling or trimming")
+            inpainter = Inpainter(self.input_dem)
+            trimmed_dem_path = self.input_dem
 
         self.input_dem = trimmed_dem_path
         self.inpainter = inpainter
@@ -182,13 +194,14 @@ class ProcessDem:
         output_dem=output_files.get("dem")
 
         """ Read a DEM and compute slope, aspect, roughness, TPI, and TRI. Output each to TIFF files based on user input. """
-        def generate_products(input_dem, dem_data, transform):
+        def generate_products(input_dem, dem_data, transform, verbose):
             """ Generator function to yield each product's data and output file path. """
             habitat_derivatives = HabitatDerivatives(
                 input_dem=input_dem,
                 dem_data=dem_data,
                 use_gdal=self.use_gdal,
-                transform=transform
+                transform=transform,
+                verbose=verbose
             )
             if output_slope:
                 yield habitat_derivatives.calculate_slope(output_slope), output_slope   # Slope
@@ -241,7 +254,7 @@ class ProcessDem:
             arcpy.env.cellSize = self.original_cell_size
 
             # Process and write each product one at a time
-            for data, output_file in generate_products(input_dem, dem_data, transform):
+            for data, output_file in generate_products(input_dem, dem_data, transform, verbose=True):
                 if data is not None:
                     with rasterio.open(
                         output_file,
@@ -360,7 +373,7 @@ class ProcessDem:
                         self.message_length = Utils.print_progress(message, self.message_length)
 
                         # D. Generate Products on Padded Data
-                        for data, output_file in generate_products(chunk_dem_path, chunk_data_padded, chunk_transform_padded):
+                        for data, output_file in generate_products(chunk_dem_path, chunk_data_padded, chunk_transform_padded, verbose=False):
                             # Ensure output folder exists for the product
                             output_dir = os.path.dirname(output_file)
                             product_name = os.path.basename(output_file).split(".")[0]

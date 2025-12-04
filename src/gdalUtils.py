@@ -1,11 +1,13 @@
 from osgeo import gdal
 import rasterio
+from rasterio.enums import Resampling
 import numpy as np
 import os
 import glob
 import subprocess
 from pathlib import Path
 from utils import Utils
+import time
 
 class GdalUtils:
     """Utility class for handling GDAL operations, including compression and conversion of DEM files."""
@@ -65,6 +67,86 @@ class GdalUtils:
         os.remove(input_dem_path)
         print(f"Converted {input_dem_path} to {output_tiff} with compression={compress} as GDAL raster TIFF.")
         return output_tiff
+    
+    @staticmethod
+    def apply_height_to_depth_transformation(input_raster_path, water_elevation=183.6):
+        """
+        Applies a height to depth transformation on a raster file using rasterio.
+        Optimizes the output raster by building GDAL overviews (pyramids).
+        """
+        # Internal function to check min/max using robust NumPy (No Pylance error)
+        def get_min_max_from_numpy(tif_file):
+            with rasterio.open(tif_file) as src:
+                data = src.read(1) # Read the entire raster band
+                nodata = src.nodata
+                
+                if nodata is not None:
+                    # Mask out nodata values using numpy
+                    data_masked = np.ma.masked_equal(data, nodata)
+                else:
+                    data_masked = data
+                    
+                # Calculate min and max of the valid data
+                min_val = data_masked.min()
+                max_val = data_masked.max()
+                
+                if np.ma.is_masked(min_val):
+                    return None, None # Entire raster is nodata
+
+                return float(min_val), float(max_val)
+
+        raster_dir = os.path.dirname(input_raster_path)
+        raster_name = Utils.sanitize_path_to_name(input_raster_path)
+        output_raster_path = os.path.join(raster_dir, f"{raster_name}_depth.tif")
+
+        # Get raster statistics (min/max)
+        min_val, max_val = get_min_max_from_numpy(input_raster_path)
+        
+        # Conditional checks for transformation
+        if min_val < 0 and max_val < 0:
+            print(f"Warning: Raster values look like depths. Min: {min_val:0.2f}, Max: {max_val:0.2f}. Did not transform from height to depth.")
+            return input_raster_path
+        elif min_val < 0 and max_val > 0:
+            print(f"Warning: Raster DEM values range from MIN: {min_val:0.2f}, Max: {max_val:0.2f}. Did not transform from height to depth.")
+            return input_raster_path
+        else:
+            # Use rasterio to apply the transformation in blocks
+            with rasterio.open(input_raster_path) as src:
+                profile = src.profile.copy()
+                # Set the output data type to float32 for precision in depth
+                profile.update({'compress': 'LZW', 'dtype': np.float32})
+                
+                with rasterio.open(output_raster_path, 'w', **profile) as dst:
+                    for ji, window in src.block_windows(1):
+                        arr = src.read(1, window=window)
+                        # Use numpy's where to apply transformation only to valid data
+                        transformed = np.where(
+                            arr == src.nodata, 
+                            src.nodata, 
+                            (water_elevation - arr) * -1
+                        )
+                        dst.write(transformed, 1, window=window)
+                        
+            # --- File Lock Wait (Optional but recommended) ---
+            time.sleep(2) 
+
+            # --- GDAL/rasterio Optimization: Build Pyramids (Overviews) ---
+            # This replaces the ArcPy BuildPyramids function and prevents the long 'verification' delays.
+            print("Transform complete. Building GDAL Overviews (Pyramids) for optimization...")
+            
+            # Define the overview levels (e.g., powers of 2 up to 128)
+            overviews = [2, 4, 8, 16, 32, 64, 128]
+            
+            # Open the output raster in 'r+' mode to add overviews and tags
+            with rasterio.open(output_raster_path, 'r+') as dst:
+                # Build the overviews using Nearest Neighbor resampling (fastest)
+                dst.build_overviews(overviews, Resampling.nearest)
+                
+                # Update tags to mark the overviews as built and define the resampling method
+                dst.update_tags(ns='rio_overview', **{'resampling': 'nearest'})
+            
+            print(f"Transformed raster saved to {output_raster_path}")
+            return output_raster_path
     
     def convert_to_cog(input_path, output_path=None, compress="DEFLATE", tile_size=512):
         input_path = Path(input_path)

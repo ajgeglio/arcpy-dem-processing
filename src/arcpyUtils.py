@@ -49,88 +49,46 @@ class ArcpyUtils:
         if min_val < 0 and max_val < 0:
             print(f"Warning: Raster values look like depths. Min: {min_val:0.2f}, Max: {max_val:0.2f}. Did not transform from height to depth.")
             return input_raster_path
+        elif min_val < 0 and max_val > 0:
+            print(f"Warning: Raster DEM values range from MIN: {min_val:0.2f}, Max: {max_val:0.2f}. Did not transform from height to depth.")
+            return input_raster_path
         else:
             print("Converting raster using ArcPy Spatial Analyst...")
+
+            #Set Compression and Pyramid Environment ---
+            original_compression = arcpy.env.compression
+            original_pyramid = arcpy.env.pyramid
+            
+            # Set desired compression for the output TIF
+            arcpy.env.compression = "LZW" 
+            
+            # Prevent automatic pyramid building during .save() to allow custom, fast building later
+            arcpy.env.pyramid = "NONE" 
+            # --- END OF FIX ---
 
             # 1. Read the input raster
             in_raster = Raster(input_raster_path)
             
             # 2. Perform the calculation (Depth = (Water_Elevation - Height) * -1)
-            # ArcPy handles the NoData implicitly
-            # a. (water_elevation - in_raster) 
-            # b. Times (-1) to invert sign for depth
             transformed_raster = Minus(water_elevation, in_raster) * -1
             
-            # 3. Save the output. ArcPy is reliable for creating statistics/pyramids here.
+            # 3. Save the output. This will now use LZW compression.
             transformed_raster.save(output_raster_path)
             
-            # 4. Cleanup (Remove explicit calls as they are no longer needed)
-            # ArcPy often creates temporary data in the environment when using Raster objects.
-            # You may still want to ensure pyramids/stats are created if the .save() step
-            # doesn't generate them fast enough (though it usually does for SA tools).
-            # For maximum reliability, keep the pyramid/stats lines, but they should now work.
+            # 4. Clean up environment settings immediately after save
+            arcpy.env.compression = original_compression
+            arcpy.env.pyramid = original_pyramid
 
             print("Transform complete. Calculating statistics and building pyramids for ArcPy optimization...")
             
-            # 1. Calculate Statistics (Keep this line for consistency, but ArcPy may have done it)
+            # 1. Calculate Statistics
             arcpy.management.CalculateStatistics(output_raster_path)
             
-            # 2. Build Pyramids (The file is now fully closed and managed by ArcPy)
-            ArcpyUtils.build_pyramids(output_raster_path) # Ensure the positional argument fix is applied here!
+            # 2. Build Pyramids (using the optimized NEAREST technique)
+            ArcpyUtils.build_pyramids(output_raster_path) 
             
             print(f"Transformed raster saved to {output_raster_path}")
             return output_raster_path
-
-    # @staticmethod
-    # def apply_height_to_depth_transformation(input_raster_path, water_elevation=183.6):
-    #     """
-    #     Applies a height to depth transformation on a raster file.
-    #     Uses arcpy to get raster statistics (min/max) to avoid loading large rasters into memory.
-    #     If all values are positive, uses rasterio to convert to depth.
-    #     Returns the path to the transformed raster, or the original path if no transformation is needed.
-    #     """
-
-    #     raster_dir = os.path.dirname(input_raster_path)
-    #     raster_name = Utils.sanitize_path_to_name(input_raster_path)
-    #     output_raster_path = os.path.join(raster_dir, f"{raster_name}_depth.tif")
-
-    #     # Use arcpy to get raster statistics (min/max)
-    #     arcpy.env.overwriteOutput = True
-    #     min_val = float(arcpy.management.GetRasterProperties(input_raster_path, "MINIMUM").getOutput(0))
-    #     max_val = float(arcpy.management.GetRasterProperties(input_raster_path, "MAXIMUM").getOutput(0))
-
-    #     if min_val < 0 and max_val < 0:
-    #         print(f"Warning: Raster values look like depths. Min: {min_val:0.2f}, Max: {max_val:0.2f}. Did not transform from height to depth.")
-    #         return input_raster_path
-    #     else:
-    #         # Use rasterio to apply the transformation in blocks
-
-    #         with rasterio.open(input_raster_path) as src:
-    #             profile = src.profile.copy()
-    #             profile.update({'compress': 'LZW'})
-    #             with rasterio.open(output_raster_path, 'w', **profile) as dst:
-    #                 for ji, window in src.block_windows(1):
-    #                     arr = src.read(1, window=window)
-    #                     arr = arr.astype(np.float32)
-    #                     arr = np.where(np.isnan(arr), np.nan, arr)
-    #                     transformed = (water_elevation - arr) * -1
-    #                     dst.write(transformed.astype(profile['dtype']), 1, window=window)
-    #         # --- START OF FILE LOCK FIX ---
-    #         # Wait a moment for the OS to release the file lock after rasterio closes it
-    #         time.sleep(2)  # 2 seconds is usually sufficient
-    #         # --- END OF FILE LOCK FIX ---
-    #         # --- START OF FIX: Add ArcPy metadata to the new raster ---
-    #         print("Transform complete. Calculating statistics and building pyramids for ArcPy optimization...")
-            
-    #         # 1. Calculate Statistics: Stops "verifying input raster" delay by pre-calculating min/max/mean.
-    #         arcpy.management.CalculateStatistics(output_raster_path)
-            
-    #         # 2. Build Pyramids: Essential for fast rendering and spatial analysis tool checks.
-    #         ArcpyUtils.build_pyramids(output_raster_path) 
-            
-    #         # --- END OF FIX ---
-    #         print(f"Transformed raster saved to {output_raster_path}")
-    #         return output_raster_path
 
     @staticmethod
     def merge_dem_arcpy(dem_chunks_folder, remove_chunks=True):
@@ -303,6 +261,43 @@ class ArcpyUtils:
         # Convert binary mask to 1, NoData
         nodata_mask = SetNull(mask_raster == 0, mask_raster)
         nodata_mask.save(output_mask_path)
+        return output_mask_path
+    
+    def create_binary_mask(input_raster, data_value=1, nodata_value=0):
+        """
+        Creates a binary mask raster where valid data is assigned 'data_value' (e.g., 1) 
+        and NoData areas are assigned 'nodata_value' (e.g., 0).
+        
+        Args:
+            input_raster_path (str): Path to the input DEM or raster.
+            output_mask_path (str): Path to save the output binary mask raster.
+            data_value (int): The value to assign to valid data areas.
+            nodata_value (int): The value to assign to the raster's original NoData areas.
+        """
+        
+        arcpy.env.overwriteOutput = True
+        
+        # 1. Read the input raster
+        in_raster = Raster(input_raster)
+
+        # 2. Check for Null (NoData) values using IsNull
+        # This creates a temporary boolean raster: 1 where NoData, 0 where data exists.
+        is_null_raster = IsNull(in_raster)
+        
+        # 3. Use Con (Conditional) to assign the final values
+        # The logic is: 
+        #   IF is_null_raster == 1 (i.e., IF the original pixel was NoData), assign nodata_value (0).
+        #   ELSE (i.e., IF the original pixel was Data), assign data_value (1).
+        binary_mask = Con(is_null_raster, nodata_value, data_value)
+        
+        # 4. Save the final output raster
+        # Note: Use a low-memory integer type (e.g., "8_BIT_UNSIGNED") for binary masks
+        name = Utils.sanitize_path_to_name(input_raster)
+        output_mask_path = os.path.join(os.path.dirname(input_raster), "boundary_files", f"{name}_binary_mask.tif") 
+        os.makedirs(os.path.dirname(output_mask_path), exist_ok=True)  # Ensure the directory exists
+        binary_mask.save(output_mask_path)
+        
+        print(f"✅ Binary mask created and saved to: {output_mask_path}")
         return output_mask_path
     
     def mask_intersector(masks):

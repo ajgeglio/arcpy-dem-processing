@@ -46,27 +46,61 @@ class GetExtents:
     @staticmethod
     def get_min_max_xy(tif_file):
         ds = gdal.Open(tif_file)
+        
+        if ds is None:
+            raise FileNotFoundError(f"Failed to open GDAL dataset for: {tif_file}")
+
+        # Extract necessary properties
+        proj_wkt = ds.GetProjectionRef()
+        gt = ds.GetGeoTransform()
+        width = ds.RasterXSize
+        height = ds.RasterYSize
+        
+        # CRITICAL FIX 1: Explicitly close the GDAL dataset immediately
+        # This ensures the file handle is released and resources are cleaned up.
+        ds = None 
+        del ds # Use del to ensure cleanup if ds wasn't already None
+        
+        # 1. Define the input coordinate system
         old_cs = osr.SpatialReference()
-        old_cs.ImportFromWkt(ds.GetProjectionRef())
-        # create the new coordinate system
+        old_cs.ImportFromWkt(proj_wkt)
+        # Recommended for consistency: Force the axis mapping strategy
+        old_cs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+        
+        # 2. Define the target coordinate system (WGS84)
         wgs84_wkt = """GEOGCS["WGS 84", DATUM["WGS_1984", SPHEROID["WGS 84", 6378137, 298.257223563, 
                         AUTHORITY["EPSG","7030"]], AUTHORITY["EPSG","6326"]], PRIMEM["Greenwich",0, 
                         AUTHORITY["EPSG","8901"]], UNIT["degree",0.01745329251994328, 
                         AUTHORITY["EPSG","9122"]], AUTHORITY["EPSG","4326"]]"""
         new_cs = osr.SpatialReference()
-        new_cs .ImportFromWkt(wgs84_wkt)
-        # create a transform object to convert between coordinate systems
-        transform = osr.CoordinateTransformation(old_cs,new_cs) 
-        #get the point to transform, pixel (0,0) in this case
-        width = ds.RasterXSize
-        height = ds.RasterYSize
-        gt = ds.GetGeoTransform()
-        miny = gt[0]
-        minx = gt[3] + width*gt[4] + height*gt[5] 
-        maxy = gt[0] + width*gt[1] + height*gt[2] 
-        maxx = gt[3]
-        #get the coordinates in lat long
-        return transform.TransformPoint(miny,minx)[0:2], transform.TransformPoint(maxy,maxx)[0:2]
+        new_cs.ImportFromWkt(wgs84_wkt)
+        new_cs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+
+        # CRITICAL FIX 2: Create a fresh transform object after initializing both CS
+        transform = osr.CoordinateTransformation(old_cs, new_cs) 
+        
+        # --- Geotransform calculations (assuming X,Y coordinates are correctly calculated as before) ---
+        
+        # Calculate the four corners in the native projection (X, Y)
+        ul_x = gt[0]
+        ul_y = gt[3]
+        lr_x = gt[0] + width * gt[1] + height * gt[2]
+        lr_y = gt[3] + width * gt[4] + height * gt[5]
+        
+        # Determine MIN/MAX in the native coordinates
+        min_x_native = min(ul_x, lr_x)
+        max_x_native = max(ul_x, lr_x)
+        min_y_native = min(ul_y, lr_y)
+        max_y_native = max(ul_y, lr_y)
+
+        # Transform MinX, MinY
+        min_lon_lat = transform.TransformPoint(min_x_native, min_y_native)[0:2]
+        
+        # Transform MaxX, MaxY
+        max_lon_lat = transform.TransformPoint(max_x_native, max_y_native)[0:2]
+        
+        # Result is: ((minLon, minLat), (maxLon, maxLat))
+        return min_lon_lat, max_lon_lat
     
     @staticmethod
     def segment_by_time(df, time_col="UTC", time_format="%Y-%m-%d %H:%M:%S.%f", threshold_seconds=240):

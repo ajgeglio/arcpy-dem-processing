@@ -7,11 +7,12 @@ from skimage.util import view_as_windows
 from shannon import flow_direction_window, fast_entropy_numba
 
 class HabitatDerivatives:
-    def __init__(self, input_dem, dem_data, use_gdal, transform=None):
+    def __init__(self, input_dem, dem_data, use_gdal, transform=None, verbose=False):
         self.input_dem = input_dem
         self.dem_data = dem_data
         self.use_gdal = use_gdal
         self.transform = transform  # Optional, used for GDAL processing
+        self.verbose = verbose
 
     def calculate_lbp(self, n_points, radius, method='default', nodata=None):
         """
@@ -76,7 +77,8 @@ class HabitatDerivatives:
             processing="hillshade",     # Specify hillshade calculation
             options=options             # Pass multiple options
         )
-        print(f"Hillshade file saved at: {hillshade_output}")
+        if self.verbose:
+            print(f"Hillshade file saved at: {hillshade_output}")
 
     def calculate_hillshade(self, hillshade_output):
         """
@@ -115,7 +117,8 @@ class HabitatDerivatives:
             processing="slope",
             options=gdal.DEMProcessingOptions(computeEdges=True)
         )
-        print(f"Slope file saved at: {output_slope}")
+        if self.verbose:
+            print(f"Slope file saved at: {output_slope}")
 
     def calculate_slope(self, output_slope):
         if self.use_gdal:
@@ -149,7 +152,8 @@ class HabitatDerivatives:
             processing="aspect",
             options=gdal.DEMProcessingOptions(computeEdges=True)
         )
-        print(f"Aspect file saved at: {output_aspect}")
+        if self.verbose:
+            print(f"Aspect file saved at: {output_aspect}")
 
     def calculate_aspect(self, output_aspect):
         if self.use_gdal:
@@ -183,7 +187,8 @@ class HabitatDerivatives:
             processing="roughness",
             options=gdal.DEMProcessingOptions(computeEdges=True)
         )
-        print(f"Roughness file saved at: {output_roughness}")
+        if self.verbose:
+            print(f"Roughness file saved at: {output_roughness}")
 
     def calculate_roughness_skimage(self):
         """ Calculate terrain roughness as the standard deviation. """
@@ -205,7 +210,8 @@ class HabitatDerivatives:
             processing="tpi",
             options=gdal.DEMProcessingOptions(computeEdges=True)
         )
-        print(f"TPI file saved at: {output_tpi}")
+        if self.verbose:
+            print(f"TPI file saved at: {output_tpi}")
 
     def calculate_tpi(self, output_tpi):
         if self.use_gdal:
@@ -226,7 +232,8 @@ class HabitatDerivatives:
                 processing='TRI', 
                 options=gdal.DEMProcessingOptions(computeEdges=True)
             )
-            print(f"TRI file saved at: {output_tri}")
+            if self.verbose:
+                print(f"TRI file saved at: {output_tri}")
 
     def calculate_tri(self, output_tri):
         if self.use_gdal:

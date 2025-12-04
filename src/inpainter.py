@@ -342,9 +342,10 @@ class Inpainter:
             message = "Generating binary mask..."
             self.message_length = Utils.print_progress(message, self.message_length)
             binary_mask_raster = Con(IsNull(Raster(boundary_raster)), 0, 1)
-
+            print()
             # Save the binary mask
             binary_mask_raster.save(binary_mask)
+            print(f"Binary mask created with dimensions: {binary_mask_raster.width}x{binary_mask_raster.height}, cell size: {binary_mask_raster.meanCellHeight}x{binary_mask_raster.meanCellWidth}")
 
         except Exception as e:
             print(f"An error occurred while creating the binary mask: {e}")

@@ -10,8 +10,6 @@ class MetaFunctions():
         Generate a binary intersection mask by multiplying the valid data masks of two rasters.
         Returns the path to the intersection mask raster.
         """
-        dem_name = Utils.sanitize_path_to_name(aligned_input_dem)
-        directory = os.path.join(os.path.dirname(aligned_input_dem), "boundary_files")
         inpainter = Inpainter(input_raster=aligned_input_dem)
         mask, dissolved_polygon = inpainter.get_data_boundary(min_area=50)
         inpainterbs = Inpainter(input_raster=aligned_input_bs)

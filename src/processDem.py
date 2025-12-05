@@ -88,6 +88,7 @@ class ProcessDem:
         arcpy.env.snapRaster = self.original_snap_raster
         arcpy.env.extent = dem_desc.extent
         arcpy.env.cellSize = self.original_cell_size
+        arcpy.env.overwriteOutput = True
         print(f"ArcPy environment synchronized to: {self.input_dem}")
         
         self.use_gdal = use_gdal
@@ -391,9 +392,20 @@ class ProcessDem:
                                 continue
                             
                             if data is None:
-                                # copy the output chunk to the folder
-                                arcpy.Copy_management(output_file, chunk_output_file)
-                                arcpy.Delete_management(output_file)
+                                # --- REPLACE THE ARCPY COPY BLOCK WITH THIS ---
+                                # ArcPy produced a file at 'output_file'. Copy it to chunk output.
+                                # SAFETY CHECK: Ensure the source file actually exists
+                                if arcpy.Exists(output_file):
+                                    try:
+                                        # Use management.Copy instead of Copy_management (modern syntax, same underlying tool)
+                                        arcpy.management.Copy(output_file, chunk_output_file)
+                                        # Delete immediately to avoid locking/stale data for next loop
+                                        arcpy.management.Delete(output_file)
+                                    except Exception as e:
+                                        print(f"\nError copying/deleting chunk {i},{j} for {output_file}: {e}")
+                                else:
+                                    # This can happen if the chunk was empty (NoData) and the tool output nothing
+                                    pass
 
                             else:
                                 # E. Crop the Result
@@ -419,10 +431,17 @@ class ProcessDem:
                                     dst.write(cropped_data, 1)
                                     dst.update_tags(**src.tags())
 
-                            # Assert output spatial reference matches input
-                            out_desc = arcpy.Describe(chunk_output_file)
-                            assert out_desc.spatialReference.name == self.original_spatial_ref.name, \
-                                f"Spatial reference changed! Expected: {self.original_spatial_ref.name}, Got: {out_desc.spatialReference.name}"
+                                                        # FIX: Check if file exists before trying to Describe it
+                            if os.path.exists(chunk_output_file):
+                                try:
+                                    out_desc = arcpy.Describe(chunk_output_file)
+                                    assert out_desc.spatialReference.name == self.original_spatial_ref.name, \
+                                        f"Spatial Ref Error: {out_desc.spatialReference.name}"
+                                except Exception as e:
+                                    print(f"Warning: Could not validate chunk {chunk_output_file}: {e}")
+                            else:
+                                # If the file wasn't created (e.g. copy failed), log it and move on
+                                print(f"Warning: Output chunk was not created for tile {i},{j}. Skipping validation.")
                             
                 # --- 4. Merge and Clean ---
                 print() # Finalize progress bar

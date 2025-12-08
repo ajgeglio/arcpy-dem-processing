@@ -12,6 +12,7 @@ import time
 import warnings
 from rasterio.windows import Window
 from derivatives import HabitatDerivatives
+import numpy as np
 
 # function converts time to human readable format
 time_convert = Utils().time_convert
@@ -237,48 +238,66 @@ class ProcessDem:
 
         if not self.divisions:
             with rasterio.open(input_dem) as src:
-                dem_data = src.read(1, masked=True)  # Read the DEM data with masked=True
-                transform = src.transform  # Get the affine transform
-                crs = src.crs  # Get the coordinate reference system
-                metadata = src.meta  # Get metadata
-                nodata = metadata['nodata']  # Get no-data value
-                dem_data = RasterUtils.replace_nodata_with_nan(dem_data, nodata)  # replace any no-data values with NaN
-                # Check if the DEM data is empty after filling no-data values
-                if RasterUtils.is_empty(dem_data, nodata):
+                dem_data = src.read(1, masked=True)
+                transform = src.transform
+                crs = src.crs
+                metadata = src.meta
+                src_nodata = metadata['nodata'] # Capture original nodata
+                
+                # Prepare data for processing (NaNs for floats)
+                dem_data_filled = RasterUtils.replace_nodata_with_nan(dem_data, src_nodata)
+                
+                if RasterUtils.is_empty(dem_data_filled, src_nodata):
                     message = "The DEM data is empty after filling no-data values."
                     self.message_length = Utils.print_progress(message, self.message_length)
                     return None
 
-            # Set arcpy.env variables before writing outputs (redundant, but ensures consistency)
-            arcpy.env.outputCoordinateSystem = self.original_spatial_ref
-            arcpy.env.snapRaster = self.original_snap_raster
-            arcpy.env.cellSize = self.original_cell_size
+                # Create a Boolean Mask of where the Data is MISSING
+                # We will use this to clean up the output products
+                if np.issubdtype(dem_data_filled.dtype, np.floating):
+                    dem_missing_mask = np.isnan(dem_data_filled)
+                else:
+                    dem_missing_mask = (dem_data_filled == src_nodata)
 
             # Process and write each product one at a time
-            for data, output_file in generate_products(input_dem, dem_data, transform, verbose=True):
+            for data, output_file in generate_products(input_dem, dem_data_filled, transform, verbose=True):
                 if data is not None:
+                    
+                    # 1. APPLY MASK (Clean edges/background)
+                    if np.issubdtype(data.dtype, np.floating):
+                        data[dem_missing_mask] = np.nan
+                        out_nodata = np.nan
+                    else:
+                        # For integer products (LBP, Hillshade), use 0 as NoData
+                        data[dem_missing_mask] = 0
+                        out_nodata = 0
+
+                    # 2. WRITE WITH COMPRESSION
                     with rasterio.open(
                         output_file,
                         'w',
                         driver='GTiff',
-                        height=dem_data.shape[0],
-                        width=dem_data.shape[1],
+                        compress='lzw',          # <--- Added Compression
+                        height=dem_data_filled.shape[0],
+                        width=dem_data_filled.shape[1],
                         count=1,
                         dtype=data.dtype,
                         crs=crs,
-                        transform=transform
+                        transform=transform,
+                        nodata=out_nodata        # <--- Added Explicit NoData
                     ) as dst:
                         dst.write(data, 1)
                         dst.update_tags(**src.tags())
 
                 # Assert output spatial reference matches input
-                out_desc = arcpy.Describe(output_file)
-                assert out_desc.spatialReference.name == self.original_spatial_ref.name, \
-                    f"Spatial reference changed! Expected: {self.original_spatial_ref.name}, Got: {out_desc.spatialReference.name}"
-                # Trim the shannon index to avoid artifacts
-                # Only trim the shannon index product after conversion
-                if "shannon" in str(output_file).lower():
-                    self.inpainter.trim_raster(output_file, self.binary_mask, overwrite=True)
+                if os.path.exists(output_file):
+                    out_desc = arcpy.Describe(output_file)
+                    assert out_desc.spatialReference.name == self.original_spatial_ref.name, \
+                        f"Spatial reference changed! Expected: {self.original_spatial_ref.name}, Got: {out_desc.spatialReference.name}"
+                    
+                    # Trim the shannon index to avoid specific window artifacts (Halo effect)
+                    if "shannon" in str(output_file).lower():
+                        self.inpainter.trim_raster(output_file, self.binary_mask, overwrite=True)
 
 
         # If we are chunking, we need to process each chunk and then merge them
@@ -411,11 +430,36 @@ class ProcessDem:
                             else:
                                 # E. Crop the Result
                                 # We calculated on the padded area, now we cut out the center "valid" area
-                                # Slicing syntax: [start_row : end_row, start_col : end_col]
                                 cropped_data = data[
                                     pad_top : pad_top + target_height, 
                                     pad_left : pad_left + target_width
                                 ]
+                                
+                                # --- FIX: APPLY MASK TO CHUNK ---
+                                # Crop the original DEM to the same size to use as a mask
+                                cropped_dem = chunk_data_padded[
+                                    pad_top : pad_top + target_height, 
+                                    pad_left : pad_left + target_width
+                                ]
+                                
+                                # Identify where the DEM is NoData (NaN)
+                                # Note: Assuming input DEM uses NaNs for NoData (standard for floats)
+                                if np.issubdtype(cropped_dem.dtype, np.floating):
+                                    mask = np.isnan(cropped_dem)
+                                else:
+                                    # If DEM is integer (less common for bathy), use 0 or user-defined nodata
+                                    mask = (cropped_dem == src.nodata) if src.nodata is not None else (cropped_dem == 0)
+
+                                # Apply this mask to the product
+                                if np.issubdtype(cropped_data.dtype, np.floating):
+                                    cropped_data[mask] = np.nan
+                                    out_nodata = np.nan
+                                else:
+                                    # For Integer products (Hillshade, LBP)
+                                    # We usually use 0 for NoData in Byte rasters
+                                    cropped_data[mask] = 0 
+                                    out_nodata = 0
+                                # --------------------------------
 
                                 # F. Save the Cropped (Seamless) Chunk
                                 with rasterio.open(

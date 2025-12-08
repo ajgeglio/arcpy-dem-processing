@@ -237,10 +237,79 @@ class HabitatDerivatives:
             if self.verbose:
                 print(f"TRI file saved at: {output_tri}")
 
+    def calculate_tri_numpy(self, output_tri):
+        """
+        Calculate Terrain Ruggedness Index (TRI) using NumPy.
+        Replaces GDAL implementation to prevent 'inf' pixels caused by 
+        squaring massive NoData values (Overflow).
+        
+        Formula: sqrt(sum((neighbor - center)^2))
+        """
+        # 1. Sanitize Data (The Fix for INF)
+        data = self.dem_data.copy()
+        
+        # Handle Masked Arrays
+        if np.ma.is_masked(data):
+            data = data.filled(np.nan)
+        
+        # Replace large negative NoData values (e.g., -3.4e38) with NaN
+        # Squaring -3.4e38 causes float32 overflow -> Infinity
+        data[data < -15000.0] = np.nan
+
+        # 2. Pad array to handle edges (pad with NaN)
+        padded = np.pad(data, 1, mode='constant', constant_values=np.nan)
+        
+        # 3. Vectorized Neighbor Differences
+        center = padded[1:-1, 1:-1]
+        sq_diff_sum = np.zeros_like(center)
+        
+        rows, cols = padded.shape
+        
+        # Iterate over 3x3 window offsets
+        for dy in [-1, 0, 1]:
+            for dx in [-1, 0, 1]:
+                if dy == 0 and dx == 0:
+                    continue
+                
+                # Create slice for neighbor
+                # Logic: padded[1+dy : -1+dy, 1+dx : -1+dx]
+                # Adjusting for end-of-array slicing conventions
+                y_start, y_end = 1 + dy, (rows - 1 + dy)
+                x_start, x_end = 1 + dx, (cols - 1 + dx)
+                
+                # Handle slice boundaries
+                neighbor = padded[
+                    y_start : y_end if y_end < rows else None, 
+                    x_start : x_end if x_end < cols else None
+                ]
+                
+                # Calculate squared difference
+                diff = neighbor - center
+                sq_diff = diff * diff
+                
+                # Treat NaN diffs as 0 so they don't corrupt the sum
+                # (Standard TRI behavior: ignore missing neighbors)
+                mask = np.isnan(sq_diff)
+                sq_diff[mask] = 0
+                
+                sq_diff_sum += sq_diff
+
+        # 4. Calculate Sqrt
+        tri = np.sqrt(sq_diff_sum)
+        
+        # 5. Restore NoData where center was NoData
+        tri[np.isnan(center)] = np.nan
+        
+        # 6. Final Safety Check for Inf
+        tri[np.isinf(tri)] = np.nan
+        
+        return tri.astype(np.float32)
+    
     def calculate_tri(self, output_tri):
         if self.use_gdal:
             self.generate_tri_gdal(output_tri)
         else:
+            self.calculate_tri_numpy(output_tri)
             raise NotImplementedError("Custom tri calculation is not implemented for non-GDAL methods.")
 
     def return_dem_data(self):

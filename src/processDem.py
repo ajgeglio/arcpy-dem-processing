@@ -246,7 +246,11 @@ class ProcessDem:
                 
                 # Prepare data for processing (NaNs for floats)
                 dem_data_filled = RasterUtils.replace_nodata_with_nan(dem_data, src_nodata)
-                
+                # --- ADD THIS SANITIZATION ---
+                if np.issubdtype(dem_data_filled.dtype, np.floating):
+                    with np.errstate(invalid='ignore'):
+                        dem_data_filled[dem_data_filled < -15000.0] = np.nan
+                # -----------------------------
                 if RasterUtils.is_empty(dem_data_filled, src_nodata):
                     message = "The DEM data is empty after filling no-data values."
                     self.message_length = Utils.print_progress(message, self.message_length)
@@ -374,7 +378,16 @@ class ProcessDem:
                         
                         # Define path for the temporary DEM chunk
                         chunk_dem_path = os.path.join(dem_chunk_temp_folder, f"{self.dem_name}_chunk_{i}_{j}.tif")
-                        
+                        # --- GLOBAL SANITIZATION FIX ---
+                        # Replace -3.4e38 (or anything deeper than -15,000m) with NaN
+                        # This prevents INF generation in Roughness/TRI and artifacts in GDAL tools
+                        if np.issubdtype(chunk_data_padded.dtype, np.floating):
+                             # Suppress warnings for comparing NaNs
+                            with np.errstate(invalid='ignore'):
+                                mask = chunk_data_padded < -15000.0
+                                if np.any(mask):
+                                    chunk_data_padded[mask] = np.nan
+                        # -------------------------------
                         # Save the PADDED DEM chunk to disk
                         with rasterio.open(
                             chunk_dem_path,

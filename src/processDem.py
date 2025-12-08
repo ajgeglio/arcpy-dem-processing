@@ -361,6 +361,7 @@ class ProcessDem:
                             chunk_dem_path,
                             'w',
                             driver='GTiff',
+                            compress='lzw',  # <--- ADD THIS
                             height=chunk_data_padded.shape[0],
                             width=chunk_data_padded.shape[1],
                             count=1,
@@ -421,6 +422,7 @@ class ProcessDem:
                                     chunk_output_file,
                                     'w',
                                     driver='GTiff',
+                                    compress='lzw',  # <--- ADD THIS
                                     height=cropped_data.shape[0],
                                     width=cropped_data.shape[1],
                                     count=1,

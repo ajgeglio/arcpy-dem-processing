@@ -11,6 +11,33 @@ import time
 
 class GdalUtils:
     """Utility class for handling GDAL operations, including compression and conversion of DEM files."""
+
+    @staticmethod
+    def raster_info(input_dem_path):
+        '''
+        print the hight, width, and pixel count of the raster path
+        input: path to raster file
+        output: print statement
+        '''
+        try:
+            with rasterio.open(input_dem_path) as src:
+                print(f"File: {input_dem_path}")
+                print("-" * 30)
+                print(f"Shape (Height, Width): {src.shape}")
+                print(f"Rows (Height): {src.height}")
+                print(f"Cols (Width):  {src.width}")
+                
+                total_pixels = src.height * src.width
+                print(f"Total Pixels: {total_pixels:,}")
+                
+                # Calculate approximate memory size in RAM for float32 (4 bytes per pixel)
+                # Result in Gigabytes (GB)
+                size_gb = (total_pixels * 4) / (1024**3)
+                print(f"Approximate RAM usage (Float32): {size_gb:.2f} GB")
+
+        except Exception as e:
+            print(f"Error reading file: {e}")
+
     @staticmethod
     def compress_tiff_with_rasterio(dem_path):
         """

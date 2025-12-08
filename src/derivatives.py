@@ -1,10 +1,12 @@
 import numpy as np
+import os
 from skimage.feature import local_binary_pattern
 from scipy import ndimage
 from osgeo import gdal
+import arcpy
 from arcpy.sa import *
-from skimage.util import view_as_windows
-from shannon import flow_direction_window, fast_entropy_numba
+from shannon import ShannonDerivatives
+
 
 class HabitatDerivatives:
     def __init__(self, input_dem, dem_data, use_gdal, transform=None, verbose=False):
@@ -241,36 +243,51 @@ class HabitatDerivatives:
         else:
             raise NotImplementedError("Custom tri calculation is not implemented for non-GDAL methods.")
 
-    def calculate_flow_direction(self):
-        """
-        Calculate the Flow Direction similar to ArcGIS (Spatial Analyst).
-        https://pro.arcgis.com/en/pro-app/latest/tool-reference/spatial-analyst/how-flow-direction-works.htm
-        """
-
-        # Use ndimage.generic_filter to apply flow_direction_window over the DEM
-        flow_direction = ndimage.generic_filter(
-            self.dem_data,
-            function=flow_direction_window,
-            size=3,
-            mode='nearest'
-        ).astype(np.int32)
-
-        return flow_direction
-
-    def calculate_shannon_index_2d(self, window_size):
-        """
-        Fast calculation of the Shannon diversity index for each window in a 2D grid.
-        Uses skimage view_as_windows and numba for speed.
-        """
-        flow_direction = self.calculate_flow_direction()
-        # Pad to handle borders
-        pad = window_size // 2
-        padded = np.pad(flow_direction, pad, mode='edge')
-        # Create sliding windows
-        windows = view_as_windows(padded, (window_size, window_size))
-        # Use numba-accelerated entropy calculation
-        shannon_indices = fast_entropy_numba(windows)
-        return shannon_indices
-
     def return_dem_data(self):
         return self.dem_data
+
+    # ==========================================================================
+    # SHANNON INDEX (Delegated to ShannonDerivatives)
+    # ==========================================================================
+    
+    def calculate_shannon_index_2d(self, window_size):
+        """
+        Calculate the Shannon diversity index for each window in a 2D grid.
+        
+        This method acts as a wrapper/orchestrator. It initializes the 
+        ShannonDerivatives utility with the current data, calculates Flow Direction
+        using the robust ArcPy strategy, and then calculates Entropy using the 
+        fast scikit-image strategy.
+        """
+        # 1. Initialize the utility class with current data and path
+        shannon_tool = ShannonDerivatives(
+            dem_data=self.dem_data, 
+            input_dem_path=self.input_dem
+        )
+        
+        # 2. Step A: Calculate Flow Direction
+        # We use the ArcPy method because it handles the 152GB memory issue 
+        # via the SetNull/Disk-I/O strategy we implemented.
+        try:
+            flow_direction = shannon_tool.calculate_flow_direction_arcpy()
+        except ImportError:
+            # Fallback if ArcPy isn't available (e.g. testing elsewhere)
+            print("Warning: ArcPy not found, falling back to Numba for Flow Direction.")
+            flow_direction = shannon_tool.calculate_flow_direction_numba()
+
+        # 3. Step B: Calculate Entropy
+        # We use skimage because it is the C-optimized, stable version.
+        try:
+            shannon_index = shannon_tool.calculate_shannon_skimage(
+                flow_direction, 
+                window_size
+            )
+        except ImportError:
+             # Fallback to SciPy if skimage is missing
+            print("Warning: scikit-image not found, falling back to SciPy for Entropy.")
+            shannon_index = shannon_tool.calculate_shannon_scipy(
+                flow_direction, 
+                window_size
+            )
+            
+        return shannon_index

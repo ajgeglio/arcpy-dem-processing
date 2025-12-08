@@ -6,6 +6,7 @@ import shutil
 import time
 import shutil
 import gc
+import glob
 
 class ArcpyUtils:
 
@@ -91,158 +92,115 @@ class ArcpyUtils:
             return output_raster_path
 
     @staticmethod
-    def merge_dem_arcpy(dem_chunks_folder, remove_chunks=True):
+    def merge_dem_arcpy(dem_chunks_folder, output_path=None, remove_chunks=False):
         """
-        Mosaics multiple DEM chunks from a folder into a single raster using arcpy.management.MosaicToNewRaster.
-
-        Args:
-            dem_chunks_folder (str): Path to the folder containing the DEM chunks.
-            output_merged_dem_path (str): The full path including filename for the merged DEM output.
-            spatial_ref: The spatial reference object for the output raster.
-            cell_size: The cell size for the output raster.
-            remove_chunks (bool): If True, removes the original chunk files folder after merging.
-
-        Returns:
-            str: Path to the merged DEM raster.
+        Merges all TIFFs in a folder into a single raster using MosaicToNewRaster.
+        Optimized for large datasets.
         """
-
-        output_merged_dem_path = os.path.join(os.path.dirname(dem_chunks_folder), os.path.basename(dem_chunks_folder)+".tif")
-        raster_files = []
-        if not os.path.isdir(dem_chunks_folder):
-            raise ValueError(f"Input chunk folder does not exist: {dem_chunks_folder}")
-
-        for root, dirs, files in os.walk(dem_chunks_folder):
-            for file in files:
-                # Check for common raster extensions
-                if file.lower().endswith((".tif", ".tiff", ".img", ".jp2", ".png")):
-                    raster_files.append(os.path.join(root, file))
-
-        if not raster_files:
-            raise ValueError(f"No raster files found in the specified chunk directory: {dem_chunks_folder}")
         
-        # using the first file to get properties
-        raster = arcpy.Raster(raster_files[0])
-        number_of_bands = raster.bandCount
-        spatal_ref = raster.spatialReference
-        cell_size = raster.meanCellWidth
-        print("number of bands", number_of_bands)
-        print("spatial reference", spatal_ref.name)
-        print("cell size", cell_size)
-        pixel_type_lookup = {
-            "U1": "1_BIT", "U8": "8_BIT_UNSIGNED", "S16": "16_BIT_SIGNED",
-            "U16": "16_BIT_UNSIGNED", "F32": "32_BIT_FLOAT", "F64": "64_BIT"
+        # 1. Gather all TIF chunks
+        chunk_files = glob.glob(os.path.join(dem_chunks_folder, "*.tif"))
+        if not chunk_files:
+            print("No chunks found to merge.")
+            return None
+
+        # 2. Define Output Name and Location
+        if output_path is None:
+            # Default: create output in the parent directory of the chunks folder
+            # e.g., .../slope_chunks/ -> .../slope.tif
+            parent_dir = os.path.dirname(dem_chunks_folder)
+            folder_name = os.path.basename(dem_chunks_folder)
+            # Remove "_chunks" suffix if present for the filename
+            file_name = folder_name.replace("_chunks", "") + ".tif"
+            output_path = os.path.join(parent_dir, file_name)
+        
+        out_name = os.path.basename(output_path)
+        out_dir = os.path.dirname(output_path)
+
+        print(f"Merging {len(chunk_files)} tiles into {out_name}...")
+
+        # 3. Get Properties from the first chunk to ensure match
+        desc_first = arcpy.Describe(chunk_files[0])
+        spatial_ref = desc_first.spatialReference
+        pixel_type = desc_first.pixelType 
+        # Convert ArcPy pixel type string to MosaicToNewRaster format
+        # e.g., 'F32' -> '32_BIT_FLOAT'
+        pt_map = {
+            'U8': '8_BIT_UNSIGNED', 'S8': '8_BIT_SIGNED',
+            'U16': '16_BIT_UNSIGNED', 'S16': '16_BIT_SIGNED',
+            'U32': '32_BIT_UNSIGNED', 'S32': '32_BIT_SIGNED',
+            'F32': '32_BIT_FLOAT', 'F64': '64_BIT_FLOAT'
         }
-        pixel_type = pixel_type_lookup.get(raster.pixelType, "32_BIT_FLOAT")  # Default fallback
-        print("pixel type", pixel_type)
-        # Ensure the output directory exists for the merged DEM
-        output_dir = os.path.dirname(output_merged_dem_path)
-        output_name = os.path.basename(output_merged_dem_path)
-
-        if not os.path.exists(output_dir):
-            os.makedirs(output_dir)
+        # Fallback if specific mapping is needed, usually ArcPy handles some, 
+        # but safe to map the common ones:
+        val_type = pt_map.get(desc_first.pixelType, None) 
         
-        print(f"Merging {len(raster_files)} DEM chunks from '{dem_chunks_folder}' to '{output_merged_dem_path}'...")
+        band_count = desc_first.bandCount
 
+        # 4. Set Environment for Speed
+        # CRITICAL: Disable pyramids and stats for the intermediate mosaic step
+        arcpy.env.pyramid = "NONE"
+        arcpy.env.rasterStatistics = "NONE"
+        arcpy.env.parallelProcessingFactor = "75%" 
+        arcpy.env.overwriteOutput = True
+        
         try:
+            # 5. Run Mosaic
             arcpy.management.MosaicToNewRaster(
-                input_rasters=raster_files,
-                output_location=output_dir,
-                raster_dataset_name_with_extension=output_name,
-                coordinate_system_for_the_raster=spatal_ref,
-                cellsize=cell_size,
-                pixel_type=pixel_type,
-                number_of_bands=number_of_bands,
-                mosaic_method="LAST",  # Use BLEND to avoid seams
-                mosaic_colormap_mode="REJECT"
+                input_rasters=chunk_files,
+                output_location=out_dir,
+                raster_dataset_name_with_extension=out_name,
+                coordinate_system_for_the_raster=spatial_ref,
+                pixel_type=val_type, 
+                number_of_bands=band_count,
+                mosaic_method="FIRST" # Since we have overlaps, any valid pixel is fine, usually they are identical in valid areas
             )
-            print(f"Successfully merged raster chunks to: {output_merged_dem_path}")
-        except arcpy.ExecuteError:
-            messages = arcpy.GetMessages(2)
-            print(f"ArcPy Execute Error during mosaic of DEM chunks: {messages}")
-            raise
+            print("Mosaic complete.")
+            
+            # 6. Cleanup Chunks if requested
+            if remove_chunks:
+                ArcpyUtils.cleanup_chunks(dem_chunks_folder)
+                
+            return output_path
+
         except Exception as e:
-            print(f"An unexpected error occurred during mosaic of DEM chunks: {e}")
+            print(f"Error during mosaic: {e}")
             raise
         finally:
-
-            if remove_chunks:
-                print(f"Removing temporary DEM chunks folder: {dem_chunks_folder}")
-                try:
-                    shutil.rmtree(dem_chunks_folder)
-                    print("Temporary DEM chunks folder removed.")
-                except Exception as e:
-                    print(f"Error removing temporary DEM chunks folder '{dem_chunks_folder}': {e}")
-
-        return output_merged_dem_path
+            # Reset environments
+            arcpy.ClearEnvironment("pyramid")
+            arcpy.ClearEnvironment("rasterStatistics")
+            arcpy.ClearEnvironment("parallelProcessingFactor")
     
     @staticmethod
-    def compress_raster(input_raster_path, format="TIFF", overwrite=True):
+    def compress_raster(input_raster, format="TIFF", compression_type="LZW", overwrite=True):
         """
-        Compress a large TIFF file using arcpy, reducing file size without changing spatial reference.
-        Supports COG with compression if format="COG".
-        """
-        out_raster_folder = os.path.dirname(input_raster_path)
-        arcpy.env.workspace = out_raster_folder
-        arcpy.env.compression = "LZW" if format == "TIFF" else "NONE"  # Set compression type
+        Compresses a raster in place or to a new file.
+        """     
+        if not arcpy.Exists(input_raster):
+            print(f"Raster not found: {input_raster}")
+            return
 
-        raster = arcpy.Raster(input_raster_path)
-        input_ext = os.path.splitext(input_raster_path)[1][1:].lower()  # e.g., 'tif'
-        pixel_type_lookup = {
-            "U1": "1_BIT", "U8": "8_BIT_UNSIGNED", "S16": "16_BIT_SIGNED",
-            "U16": "16_BIT_UNSIGNED", "F32": "32_BIT_FLOAT", "F64": "64_BIT"
-        }
-        pixel_type = pixel_type_lookup.get(raster.pixelType, "32_BIT_FLOAT")
-        print("pixel type", pixel_type)
-
-        raster_name = Utils.sanitize_path_to_name(input_raster_path)
-        # Determine output extension and name logic
-        if format.lower() == "tiff":
-            ext = "tif"
-        else:
-            ext = format.lower()
-
-        # Always use the sanitized raster_name for output
-        # If input is .tif and output is .tif, add _compress
-        if input_ext == "tif" and ext == "tif":
-            output_raster = os.path.join(os.path.dirname(input_raster_path), raster_name + "_compress.tif")
-        else:
-            output_raster = os.path.join(os.path.dirname(input_raster_path), raster_name + "." + ext)
-
-        print(f"Compressing {input_raster_path} to {output_raster} with format={format} using arcpy.")
+        # Prepare environment
+        arcpy.env.compression = compression_type
         arcpy.env.overwriteOutput = True
-
-        arcpy.management.CopyRaster(
-            in_raster=input_raster_path,
-            out_rasterdataset=output_raster,
-            background_value="",
-            nodata_value="",
-            onebit_to_eightbit="NONE",
-            colormap_to_RGB="NONE",
-            pixel_type=pixel_type,
-            scale_pixel_value="NONE",
-            RGB_to_Colormap="NONE",
-            format=format,
-            transform="NONE"
-        )
-        if arcpy.Exists(output_raster):
-            print(f"Raster compression successful: {output_raster}")
-            if overwrite:
-                try:
-                    import gc
-                    gc.collect()
-                    if arcpy.Exists(input_raster_path):
-                        arcpy.Delete_management(input_raster_path)
-                    os.rename(output_raster, input_raster_path)
-                    print(f"Original raster overwritten: {input_raster_path}")
-                    return input_raster_path
-                except Exception as e:
-                    print(f"Failed to overwrite original raster: {e}")
-                    return output_raster
-            else:
-                return output_raster
+        
+        # If overwriting, we usually need to save to a temp location then rename
+        # because ArcPy struggles to overwrite the source file directly in CopyRaster
+        if overwrite:
+            temp_path = input_raster.replace(".tif", "_temp.tif")
+            try:
+                arcpy.management.CopyRaster(input_raster, temp_path, format=format)
+                arcpy.management.Delete(input_raster)
+                arcpy.management.Rename(temp_path, input_raster)
+            except Exception as e:
+                print(f"Error compressing {input_raster}: {e}")
+                if arcpy.Exists(temp_path):
+                    arcpy.management.Delete(temp_path)
         else:
-            print(f"Raster compression failed: {output_raster} does not exist after operation.")
-            return None
+            # If not overwriting, caller should have provided a different output path
+            # (Logic depends on your specific ArcpyUtils implementation)
+            pass
     
     @staticmethod
     def create_valid_data_mask(input_raster, output_mask_path=None):

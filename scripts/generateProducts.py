@@ -20,10 +20,10 @@ def main():
     parser.add_argument("--input_binary_mask", type=str, required=False, help="Path to the input binary mask file used for boundary control.")
     parser.add_argument("--divisions", type=int, default = None, help="Divide the height by this to run tile processing of DEM file, automatic overalap computed.")
     parser.add_argument("--shannon_window", type=int, default = [3, 9, 21], help="Window size for shannon index.")
-    parser.add_argument("--fill_method", type=str, default="IDW", choices=["IDW", "FocalStatistics", "NoFill"], help="Method to fill voids in the DEM, or skip with None.")
+    parser.add_argument("--fill_method", type=str, default="IDW", choices=["IDW", "FocalStatistics", "NoFill"], help="Method to fill voids in the DEM, or skip filling with NoFill.")
     parser.add_argument("--fill_iterations", type=int, default=1, help="Number of iterations for filling voids in the DEM.")
     parser.add_argument("--products", type=str, nargs="+", default=["slope", "aspect", "roughness", "tpi", "tri", "hillshade", "shannon_index"],
-                        choices=["slope", "aspect", "roughness", "tpi", "tri", "hillshade", "shannon_index", "dem", "lbp-3-1", "lbp-15-2", "lbp-21-3"],
+                        choices=["slope", "aspect", "roughness", "tpi", "tri", "hillshade", "shannon_index", "dem", "lbp-3-1", "lbp-15-2", "lbp-21-3", "None"],
                         metavar="PRODUCTS",
                         help="List of products to generate (e.g., slope, aspect, roughness, hillshade, shannon_index, ...)")
     parser.add_argument("--generate_geomorphons", action="store_true", help="Generate geomorphons from the DEM. This will create landforms using ArcGIS Pro's GeomorphonLandforms tool.")
@@ -81,6 +81,8 @@ def main():
     if fill_method == "NoFill":
         fill_method = None
     fill_iterations = args.fill_iterations
+    if products == "None" or len(products) == 0:
+        products = None
     # Validate input arguments
 
     print("ORIGINAL PATH:", INPUT_DEM)
@@ -90,22 +92,26 @@ def main():
     print(GetExtents.return_min_max_tif_df([INPUT_DEM]))
     print()
     # Create an instance of the HabitatDerivatives class with the specified parameters
-    generateDerivatives = ProcessDem(
-                            input_dem=INPUT_DEM, 
-                            input_bs=INPUT_BS,
-                            binary_mask=BINARY_MASK,
-                            output_folder=RASTER_DIR,
-                            products=products,
-                            shannon_window=shannon_window,
-                            fill_method=fill_method,
-                            fill_iterations=fill_iterations,
-                            divisions=divisions,
-                            )
-    generateDerivatives.process_dem()
+    if args.products is None or len(args.products) == 0:
+        print("No products specified.")
+    else:
+        generateDerivatives = ProcessDem(
+                                input_dem=INPUT_DEM, 
+                                input_bs=INPUT_BS,
+                                binary_mask=BINARY_MASK,
+                                output_folder=RASTER_DIR,
+                                products=products,
+                                shannon_window=shannon_window,
+                                fill_method=fill_method,
+                                fill_iterations=fill_iterations,
+                                divisions=divisions,
+                                )
+        generateDerivatives.process_dem()
 
     if args.generate_geomorphons:
         # create original landforms from ArcGIS Pro
-        if fill_method == "NoFill":
+        if fill_method is None:
+            # If no fill method is specified, use the original DEM
             base_dem = args.input_dem
         else:
             base_dem = os.path.join(os.path.dirname(args.input_dem), "filled", f"*{BATHY_MARKER}*.tif")

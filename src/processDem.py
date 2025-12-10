@@ -345,6 +345,30 @@ class ProcessDem:
                 for i in range(0, src.height, tile_size):
                     for j in range(0, src.width, tile_size):
                         tile_counter += 1
+
+                        # --- OPTIMIZATION 1: Check if this tile is already fully processed ---
+                        # This allows "Starting where we left off" efficiently
+                        all_products_exist = True
+                        for prod_key, prod_master_path in output_files.items():
+                            # Reconstruct the expected chunk path for this product
+                            # Master: .../derivatives/name_slope.tif
+                            # Chunk Dir: .../derivatives/name_slope/
+                            # Chunk File: .../derivatives/name_slope/name_slope_chunk_{i}_{j}.tif
+                            
+                            prod_dir = os.path.dirname(prod_master_path)
+                            prod_name = os.path.basename(prod_master_path).split(".")[0]
+                            chunk_folder = os.path.join(prod_dir, prod_name)
+                            chunk_path = os.path.join(chunk_folder, f"{prod_name}_chunk_{i}_{j}.tif")
+                            
+                            if not os.path.exists(chunk_path):
+                                all_products_exist = False
+                                break
+                        
+                        if all_products_exist:
+                            message = f"Skipping Tile {tile_counter}/{total_tiles} (Already processed)"
+                            self.message_length = Utils.print_progress(message, self.message_length)
+                            continue
+                        # ---------------------------------------------------------------------
                         # A. Define the "Target" Window (The final output size for this tile)
                         # This determines where the final pixels go in the mosaic
                         target_width = min(tile_size, src.width - j)
@@ -371,37 +395,47 @@ class ProcessDem:
                         pad_top = i - read_row_start
                         pad_left = j - read_col_start
 
-                        # C. Read and Save the Buffered Chunk
-                        # We perform calculations on the *Expanded* (Buffered) data
-                        chunk_data_padded = src.read(1, window=read_window)
-                        chunk_transform_padded = src.window_transform(read_window)
-                        
                         # Define path for the temporary DEM chunk
                         chunk_dem_path = os.path.join(dem_chunk_temp_folder, f"{self.dem_name}_chunk_{i}_{j}.tif")
-                        # --- GLOBAL SANITIZATION FIX ---
-                        # Replace -3.4e38 (or anything deeper than -15,000m) with NaN
-                        # This prevents INF generation in Roughness/TRI and artifacts in GDAL tools
-                        if np.issubdtype(chunk_data_padded.dtype, np.floating):
-                             # Suppress warnings for comparing NaNs
-                            with np.errstate(invalid='ignore'):
-                                mask = chunk_data_padded < -15000.0
-                                if np.any(mask):
-                                    chunk_data_padded[mask] = np.nan
-                        # -------------------------------
-                        # Save the PADDED DEM chunk to disk
-                        with rasterio.open(
-                            chunk_dem_path,
-                            'w',
-                            driver='GTiff',
-                            compress='lzw',  # <--- ADD THIS
-                            height=chunk_data_padded.shape[0],
-                            width=chunk_data_padded.shape[1],
-                            count=1,
-                            dtype=str(chunk_data_padded.dtype),
-                            crs=original_dem_crs,
-                            transform=chunk_transform_padded # Use the padded transform
-                        ) as dst:
-                            dst.write(chunk_data_padded, 1)
+
+                        # --- OPTIMIZATION 2: Reuse existing temp chunk if available ---
+                        # If the products weren't finished but the raw chunk exists, read it
+                        # instead of hitting the massive original file.
+                        chunk_data_padded = None
+                        chunk_transform_padded = None
+                        
+                        if os.path.exists(chunk_dem_path):
+                            try:
+                                with rasterio.open(chunk_dem_path) as tmp_src:
+                                    chunk_data_padded = tmp_src.read(1)
+                                    chunk_transform_padded = tmp_src.transform
+                                # message = f"Processing Tile {tile_counter}/{total_tiles} (Cached Input)"
+                                # self.message_length = Utils.print_progress(message, self.message_length)
+                            except Exception as e:
+                                print(f"Warning: Corrupt temp chunk found, recreating: {e}")
+                                chunk_data_padded = None
+
+                        if chunk_data_padded is None:
+                            # C. Read and Save the Buffered Chunk (Original Logic)
+                            chunk_data_padded = src.read(1, window=read_window)
+                            chunk_transform_padded = src.window_transform(read_window)
+                            
+                            # Global Sanitization Fix
+                            if np.issubdtype(chunk_data_padded.dtype, np.floating):
+                                with np.errstate(invalid='ignore'):
+                                    mask = chunk_data_padded < -15000.0
+                                    if np.any(mask):
+                                        chunk_data_padded[mask] = np.nan
+
+                            with rasterio.open(
+                                chunk_dem_path, 'w', driver='GTiff',
+                                compress='lzw',
+                                height=chunk_data_padded.shape[0], width=chunk_data_padded.shape[1],
+                                count=1, dtype=str(chunk_data_padded.dtype),
+                                crs=original_dem_crs, transform=chunk_transform_padded
+                            ) as dst:
+                                dst.write(chunk_data_padded, 1)
+                        # -----------------------------------------------------------
 
                         message = f"Processing tile {tile_counter}/{total_tiles} (Overlap: {overlap_px}px)"
                         self.message_length = Utils.print_progress(message, self.message_length)
@@ -420,8 +454,6 @@ class ProcessDem:
 
                             # Skip processing if the chunk already exists
                             if os.path.exists(chunk_output_file):
-                                message = f"Skipping existing chunk at ({i}_{j}) (row_col) for {output_file}."
-                                self.message_length = Utils.print_progress(message, self.message_length)
                                 continue
                             
                             if data is None:
@@ -485,7 +517,8 @@ class ProcessDem:
                                     count=1,
                                     dtype=cropped_data.dtype,
                                     crs=original_dem_crs,
-                                    transform=write_transform # Use the original TARGET transform
+                                    transform=write_transform, # Use the original TARGET transform
+                                    nodata=out_nodata
                                 ) as dst:
                                     dst.write(cropped_data, 1)
                                     dst.update_tags(**src.tags())

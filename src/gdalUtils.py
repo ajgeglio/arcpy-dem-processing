@@ -8,6 +8,7 @@ import subprocess
 from pathlib import Path
 from utils import Utils
 import time
+import gc
 
 class GdalUtils:
     """Utility class for handling GDAL operations, including compression and conversion of DEM files."""
@@ -37,6 +38,134 @@ class GdalUtils:
 
         except Exception as e:
             print(f"Error reading file: {e}")
+
+    @staticmethod
+    def fix_raster_artifacts(raster_path, overwrite=True):
+        """
+        Universal cleaner for derivative products.
+        Fixes:
+        1. Infinity (inf) pixels
+        2. Deep Negative NoData (-3.4e38)
+        3. Massive Positive Artifacts (+3.4e38)
+        4. Compresses output (LZW)
+        """
+        if not os.path.exists(raster_path):
+            print(f"File not found: {raster_path}")
+            return
+
+        temp_path = raster_path.replace(".tif", "_temp_clean.tif")
+        fname = os.path.basename(raster_path)
+        
+        # Thresholds
+        LOWER_LIMIT = -15000.0  
+        UPPER_LIMIT = 1e30      
+
+        try:
+            with rasterio.open(raster_path) as src:
+                meta = src.meta.copy()
+                
+                # Check if data is floating point (Slope, Aspect, TRI, etc.)
+                is_float = np.issubdtype(meta['dtype'], np.floating)
+                
+                # 1. Update Metadata for Compression and Nodata
+                update_params = {
+                    'compress': 'lzw',
+                    'driver': 'GTiff',
+                    'BIGTIFF': 'YES',
+                    'tiled': True  # Tiled is better for large rasters
+                }
+
+                # Optimization: Add Predictor for better LZW compression
+                # 2 = Horizontal differencing (Good for numbers)
+                # 3 = Floating point predictor (Best for floats)
+                if is_float:
+                    update_params['predictor'] = 3
+                    update_params['nodata'] = np.nan # Must be NaN for transparency in floats
+                else:
+                    update_params['predictor'] = 2
+                    # Keep original nodata for integers, or default to 0
+                    if meta['nodata'] is None:
+                        update_params['nodata'] = 0
+
+                meta.update(update_params)
+                
+                # Determine the fill value to use
+                fill_value = meta['nodata']
+
+                with rasterio.open(temp_path, 'w', **meta) as dst:
+                    # block_windows allows processing 150GB files without RAM issues
+                    for ji, window in src.block_windows(1):
+                        # Read RAW data (masked=False is faster and easier to write back)
+                        dem_data = src.read(1, window=window)
+                        
+                        has_changes = False
+                        
+                        # Only apply float cleaning logic to float rasters
+                        if is_float:
+                            # 1. Fix Infinity (inf)
+                            if np.isinf(dem_data).any():
+                                dem_data[np.isinf(dem_data)] = fill_value
+                                has_changes = True
+                            
+                            # 2. Fix Extreme Values (Deep Negative / Massive Positive)
+                            # Use errstate to silence warnings about comparing NaNs
+                            with np.errstate(invalid='ignore'):
+                                # Check Lower Limit (-3.4e38)
+                                mask_low = (dem_data < LOWER_LIMIT)
+                                if mask_low.any():
+                                    dem_data[mask_low] = fill_value
+                                    has_changes = True
+
+                                # Check Upper Limit (+3.4e38)
+                                mask_high = (dem_data > UPPER_LIMIT)
+                                if mask_high.any():
+                                    dem_data[mask_high] = fill_value
+                                    has_changes = True
+                                    
+                                # Optional: Fix -9999 if it exists as a raw value
+                                mask_9999 = (dem_data == -9999)
+                                if mask_9999.any():
+                                    dem_data[mask_9999] = fill_value
+                                    has_changes = True
+
+                        # Write the cleaned data
+                        dst.write(dem_data, 1, window=window)
+
+            # Swap files
+            if overwrite:
+                gc.collect() # Release file handles
+                try:
+                    os.remove(raster_path)
+                    os.rename(temp_path, raster_path)
+                    print(f"Fixed and Compressed: {fname}")
+                except OSError as e:
+                    print(f"Error overwriting {fname}: {e}. Output at {temp_path}")
+            else:
+                print(f"Cleaned file saved as: {temp_path}")
+
+        except Exception as e:
+            print(f"Error processing {fname}: {e}")
+            if os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except:
+                    pass
+
+            if overwrite:
+                gc.collect() # Release file locks
+                try:
+                    os.remove(raster_path)
+                    os.rename(temp_path, raster_path)
+                    print(f"Fixed: {fname}")
+                except OSError as e:
+                    print(f"Error overwriting {fname}: {e}")
+            else:
+                print(f"Cleaned file saved as: {temp_path}")
+
+        except Exception as e:
+            print(f"Error processing {fname}: {e}")
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
 
     @staticmethod
     def compress_tiff_with_rasterio(dem_path):
@@ -340,3 +469,13 @@ class GdalUtils:
             except Exception as e:
                 results[tif] = f"Error: {str(e)}"
         return results
+    
+    def read_raster(raster_path):
+        """
+        Reads a raster file and returns its data as a numpy array.
+        
+        :param raster_path: Path to the raster file.
+        :return: Numpy array of raster data.
+        """
+        with rasterio.open(raster_path) as src:
+            return src.read(1, masked=True)  # Read the first band with masking

@@ -30,7 +30,6 @@ except ImportError:
 
 try:
     from skimage.filters.rank import entropy as skimage_entropy
-    from skimage.morphology import footprint_rectangle as square
 except ImportError:
     skimage_entropy = None
     square = None
@@ -418,7 +417,7 @@ class ShannonDerivatives:
         if skimage_entropy is None: raise ImportError("scikit-image is not installed.")
         
         # Define Footprint
-        footprint = square(window_size)
+        footprint = np.ones((window_size, window_size), dtype=np.uint8)
         
         # Ensure input fits in uint8/uint16 (Flow dir is usually 0-128, so uint8 is safe)
         flow_uint = flow_direction.astype(np.uint8)

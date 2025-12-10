@@ -9,7 +9,7 @@ from shannon import ShannonDerivatives
 
 
 class HabitatDerivatives:
-    def __init__(self, input_dem, dem_data, use_gdal, transform=None, verbose=False):
+    def __init__(self, input_dem, dem_data, use_gdal=True, transform=None, verbose=False):
         self.input_dem = input_dem
         self.dem_data = dem_data
         self.use_gdal = use_gdal

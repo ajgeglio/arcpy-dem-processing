@@ -103,30 +103,54 @@ class PlotDEM:
             plt.show()
         plt.close(fig)
 
-    def generate_lbp_heatmap(self, n_points, radius, method='default', save_fig=False, show=True):
+    def generate_lbp_heatmap(self, n_points=24, radius=3, method='uniform', save_fig=False, show=True):
         """
-        Computes the LBP of a DEM and overlays it as a heatmap.
-
-        Parameters:
-        output_heatmap_path (str): Path to save the LBP heatmap. If None, does not save.
-        show (bool): Whether to display the plot interactively.
-        n_points (int): Number of neighboring points for LBP.
-        radius (int): Radius for LBP calculation.
-
-        Returns:
-        None (Saves the heatmap and displays it).
+        Visualizes LBP. Uses a discrete colormap if method is 'uniform'.
         """
         lbp_array = self.hd.calculate_lbp(n_points, radius, method=method)
-        cmap = plt.cm.jet
-        cmap.set_under(color='none')
-        fig, ax = plt.subplots(figsize=(10, 8))
-        heatmap = ax.imshow(lbp_array, cmap=cmap, alpha=0.7, vmin=0.1)
-        plt.colorbar(heatmap, ax=ax, label="LBP Intensity")
-        ax.set_title(f"LBP Heatmap (window=NONE, n_points={n_points}, radius={radius}, method={method})")
+        
+        # 1. Mask the Background
+        # Mask NaNs so they appear white
+        lbp_masked = np.ma.masked_invalid(lbp_array)
+
+        fig, ax = plt.subplots(figsize=(12, 10))
+
+        # 2. Configure Colormap based on method
+        if method == 'uniform' or method == 'nri_uniform':
+            # Uniform LBP produces a limited number of integer codes (0 to P+1)
+            # We treat this as categorical/discrete data.
+            # n_points + 2 is the max number of unique labels in uniform LBP
+            num_labels = n_points + 2
+            cmap = plt.cm.get_cmap('tab20c', num_labels) # Discrete colors
+            cmap.set_bad(color='white')
+            
+            heatmap = ax.imshow(lbp_masked, cmap=cmap, interpolation='nearest')
+            
+            # Discrete Colorbar
+            cbar = plt.colorbar(heatmap, ax=ax, ticks=range(num_labels), label="LBP Pattern Class")
+            cbar.ax.set_yticklabels([str(i) for i in range(num_labels)])
+            
+        else:
+            # Default/Rotation Invariant LBP produces 0-255 (or higher)
+            # Use grayscale or plasma to show "roughness/texture intensity"
+            cmap = plt.cm.inferno
+            cmap.set_bad(color='white')
+            
+            # Robust scaling to ignore outliers
+            vmin, vmax = np.nanpercentile(lbp_array, [2, 98])
+            
+            heatmap = ax.imshow(lbp_masked, cmap=cmap, vmin=vmin, vmax=vmax)
+            plt.colorbar(heatmap, ax=ax, label="LBP Code Value")
+
+        ax.set_title(f"LBP Texture ({method}, P={n_points}, R={radius})")
         ax.axis("off")
+
         if save_fig:
-            output_heatmap_path = f"{self.dem_path.split('.')[0]}_lbp_heatmap.png"
+            # Use dem_name if available
+            name = getattr(self, 'dem_name', 'output')
+            output_heatmap_path = f"{name}_lbp_{method}_heatmap.png"
             plt.savefig(output_heatmap_path, dpi=300, bbox_inches='tight')
+
         if show:
             plt.show()
         plt.close(fig)

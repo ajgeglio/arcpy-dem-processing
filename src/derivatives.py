@@ -16,44 +16,39 @@ class HabitatDerivatives:
         self.transform = transform  # Optional, used for GDAL processing
         self.verbose = verbose
 
-    def calculate_lbp(self, n_points, radius, method='default', nodata=None):
+    def calculate_lbp(self, n_points, radius, method='uniform', nodata=None):
         """
-        Generate a Local Binary Pattern (LBP) representation from a DEM using a sliding window approach.
-
-        Parameters:
-        dem_data(numpy.ndarray): Input DEM as a 2D NumPy array.
-        radius (int): Radius of LBP neighborhood.
-        n_points (int): Number of circularly symmetric neighbor points.
-        method (str): Method to compute LBP ('default', 'uniform', etc.).
-
-        Returns:
-        numpy.ndarray: LBP-transformed DEM with the same shape.
+        Generate LBP using raw float data for maximum texture detail.
+        Defaults to 'uniform' method for interpretable texture classes.
         """
-        dem_data = self.dem_data
-        # Create a mask for valid data (not nodata, not NaN)
+        dem_data = self.dem_data.copy()
+        
+        # 1. Handle NaNs/NoData
+        # LBP requires a filled array. We fill NaNs with the minimum value 
+        # so they acts as a "background" that is lower than neighbors.
+        if np.ma.is_masked(dem_data):
+            dem_data = dem_data.filled(np.nan)
+        
+        valid_mask = ~np.isnan(dem_data)
+        
+        # Fill NaNs with min value to allow computation without errors
+        # (We will mask these back out later)
+        if valid_mask.any():
+            safe_fill = np.nanmin(dem_data)
+            dem_data[~valid_mask] = safe_fill
+        else:
+            return np.full_like(dem_data, np.nan)
+
+        # 2. Compute LBP on RAW floats (No casting to uint8)
+        # 'uniform' method creates: n_points + 2 possible values
+        lbp = local_binary_pattern(dem_data, P=n_points, R=radius, method=method)
+
+        # 3. Restore NaNs
+        lbp[~valid_mask] = np.nan
+        
+        # 4. Handle specific nodata if provided
         if nodata is not None:
-            valid_mask = (~np.isnan(dem_data)) & (dem_data != nodata)
-        else:
-            valid_mask = ~np.isnan(dem_data)
-
-        # Normalize the DEM data to the range 0-255 for valid data only
-        valid_data = dem_data[valid_mask]
-        if valid_data.size > 0:
-            min_val = valid_data.min()
-            max_val = valid_data.max()
-            if max_val > min_val:
-                normalized_data = np.zeros_like(dem_data, dtype=np.uint8)
-                normalized_data[valid_mask] = ((dem_data[valid_mask] - min_val) / (max_val - min_val) * 255).astype(np.uint8)
-            else:
-                normalized_data = np.zeros_like(dem_data, dtype=np.uint8)
-        else:
-            normalized_data = np.zeros_like(dem_data, dtype=np.uint8)
-
-        # Compute LBP for the entire DEM
-        lbp = local_binary_pattern(normalized_data, P=n_points, R=radius, method=method)
-
-        # Set LBP to 0 (or np.nan) where data is invalid
-        lbp[~valid_mask] = 0  # or use np.nan if preferred and dtype allows
+             lbp[dem_data == nodata] = np.nan
 
         return lbp
 

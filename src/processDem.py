@@ -207,9 +207,10 @@ class ProcessDem:
         output_tpi=output_files.get("tpi")
         output_tri=output_files.get("tri")
         output_hillshade=output_files.get("hillshade")
-        output_lbp_3_1=output_files.get("lbp-3-1")
+        output_lbp_8_1=output_files.get("lbp-8-1")
         output_lbp_15_2=output_files.get("lbp-15-2")
-        output_lbp_21_3=output_files.get("lbp-21-3")
+        output_lbp_21_4=output_files.get("lbp-21-4")
+        output_lbp=output_files.get("lbp-21-4")
         output_dem=output_files.get("dem")
 
         """ Read a DEM and compute slope, aspect, roughness, TPI, and TRI. Output each to TIFF files based on user input. """
@@ -246,12 +247,14 @@ class ProcessDem:
                 if key in output_files and key not in products_to_skip:
                     yield habitat_derivatives.calculate_shannon_index_2d(win), output_files[key]
             
-            if output_lbp_3_1 and "lbp-3-1" not in products_to_skip:
-                yield habitat_derivatives.calculate_lbp(3, 1), output_lbp_3_1
+            if output_lbp_8_1 and "lbp-8-1" not in products_to_skip:
+                yield habitat_derivatives.calculate_lbp(8, 1), output_lbp_8_1
             if output_lbp_15_2 and "lbp-15-2" not in products_to_skip:
                 yield habitat_derivatives.calculate_lbp(15, 2), output_lbp_15_2
-            if output_lbp_21_3 and "lbp-21-3" not in products_to_skip:
-                yield habitat_derivatives.calculate_lbp(21, 3), output_lbp_21_3
+            if output_lbp_21_4 and "lbp-21-4" not in products_to_skip:
+                yield habitat_derivatives.calculate_lbp(21, 4), output_lbp_21_4
+            if output_lbp and "lbp" not in products_to_skip:
+                yield habitat_derivatives.calculate_lbp(21, 4), output_lbp_21_4
             if output_dem and "dem" not in products_to_skip:
                 yield habitat_derivatives.return_dem_data(), output_dem
             

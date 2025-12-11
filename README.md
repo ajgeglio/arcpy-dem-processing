@@ -1,9 +1,3 @@
-Here is the updated `README.md`.
-
-I have significantly expanded the **Usage** section to document the CLI arguments for `generateProducts.py`, added concrete examples for common workflows (like tiling and landforms), and clarified the Installation section regarding the dependency on ArcGIS Pro.
-
----
-
 # USGS Northern Lake Michigan Reefs: DEM Processing Tools
 
 This repository contains Python scripts and tools for processing, analyzing, and visualizing bathymetric data related to the USGS Northern Lake Michigan Reefs project. The toolkit automates the generation of spatial derivative products from Digital Elevation Models (DEMs) and Backscatter intensity data to support habitat classification.
@@ -178,4 +172,5 @@ This software has been approved for release by the U.S. Geological Survey (USGS)
 
 *   **Anthony Geglio** (ageglio@mtu.edu)
 *   **Peter Esselman** - USGS Great Lakes Science Center
+
 *   **Advanced Technology Lab** - Ann Arbor, MI

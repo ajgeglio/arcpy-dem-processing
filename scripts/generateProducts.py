@@ -28,12 +28,14 @@ def main():
     
     # Updated choices to include landform options
     parser.add_argument("--products", type=str, nargs="+", 
-                        default=["slope", "aspect", "roughness", "tpi", "tri", "hillshade", "shannon_index"],
+                        default=["slope", "aspect", "roughness", "tpi", "tri", "hillshade"],
                         choices=[
-                            "slope", "aspect", "roughness", "tpi", "tri", "hillshade", "shannon_index", "dem", 
-                            "lbp-3-1", "lbp-15-2", "lbp-21-3", 
-                            "bathymorphons", 
-                            "None"
+                            "slope", "aspect", "roughness", "tpi", "tri", "hillshade", # standard gdal products
+                            "shannon_index",  # window radii based on input
+                            "lbp-8-1", "lbp-15-2", "lbp-21-4", "lbp", # defaults to n=21 and r=4
+                            "bathymorphons", # defaults to create all
+                            "dem", # just return dem
+                            "None" # don't process dem
                         ],
                         metavar="PRODUCTS",
                         help="List of products to generate.")

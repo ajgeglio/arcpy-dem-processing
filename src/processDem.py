@@ -12,6 +12,7 @@ import time
 import warnings
 from rasterio.windows import Window
 from derivatives import HabitatDerivatives
+from landforms import Landforms
 import numpy as np
 
 # function converts time to human readable format
@@ -46,7 +47,7 @@ class ProcessDem:
         products=None,
         fill_method=None,
         fill_iterations=1,
-        generate_boundary=True
+        save_chunks=False
     ):
         """
         Initialize the HabitatDerivatives class.
@@ -118,7 +119,7 @@ class ProcessDem:
         self.products = products if products is not None else []
         self.fill_iterations = fill_iterations  # Number of iterations for filling gaps
         self.fill_method = fill_method # IDW or FocalStatistics or None
-        self.generate_boundary = generate_boundary # for binary mask and boundary shapefile
+        self.save_chunks = save_chunks
         self.message_length = 0
 
         # Initialize inpainter and binary mask according to the input parameters
@@ -136,7 +137,7 @@ class ProcessDem:
 
         elif self.input_dem and not self.input_bs and not self.binary_mask:
             if fill_method is not None:
-                trimmed_dem_path, binary_mask, inpainter = MetaFunctions.fill_and_return_mask(self.input_dem, fill_method, fill_iterations, generate_boundary)
+                trimmed_dem_path, binary_mask, inpainter = MetaFunctions.fill_and_return_mask(self.input_dem, fill_method, fill_iterations)
             if fill_method is None:
                 print("Generating the binary mask from the inpur raster, no filling")
                 trimmed_dem_path = self.input_dem
@@ -152,38 +153,54 @@ class ProcessDem:
         self.inpainter = inpainter
         arcpy.env.extent = Raster(self.binary_mask).extent
 
-    def process_dem(self): 
-        """ Process the DEM to generate habitat derivatives. """
         if not self.input_dem:
             raise ValueError("Input DEM is not provided. Please provide a valid DEM path.")
         if not self.products:
             self.products = ["slope", "aspect", "roughness", "tpi", "tri", "hillshade"]
-        print()
-        print("Generating products", self.products)
-        input_dem = self.input_dem
-        print("........", input_dem)
         
+        # --- FIX: Expand Bathymorphons to all sub-products ---
+        if self.products:
+            # Normalize input keys (handle 'geomorphons' alias if used)
+            if "geomorphons" in self.products:
+                self.products.remove("geomorphons")
+                if "bathymorphons" not in self.products:
+                    self.products.append("bathymorphons")
+
+            if "bathymorphons" in self.products:
+                self.products.remove("bathymorphons")
+                # Add specific classes if not present
+                for p in ["bathymorphons_raw", "bathymorphons_10c", "bathymorphons_6c", "bathymorphons_5c", "bathymorphons_4c"]:
+                    if p not in self.products:
+                        self.products.append(p)
+
+        # Output file paths
+        output_files = {}
+        for key in self.products:
+            if key == "shannon_index":
+                for win in self.shannon_window:
+                    output_files[f"{key}_{win}"] = os.path.join(self.habitat_derivatives_folder, f"{self.dem_name}_{key}_{win}.tif")
+            # Handle Bathymorphons file naming
+            elif "bathymorphons" in key:
+                # e.g. bathymorphons_10c -> name_bathymorphons_10c.tif
+                output_files[key] = os.path.join(self.habitat_derivatives_folder, f"{self.dem_name}_{key}.tif")
+            else:
+                output_files[key] = os.path.join(self.habitat_derivatives_folder, f"{self.dem_name}_{key}.tif")
         # define window for shannon index
         if isinstance(self.shannon_window, tuple):
             window = self.shannon_window[0]
         else:
             window = self.shannon_window
         
-        # creating output file paths based on the product list
-        output_files = {}
-        for key in self.products:
-            if key == "shannon_index":
-                # For shannon_index, create output files for each window size
-                for win in self.shannon_window:
-                    output_files[f"{key}_{win}"] = os.path.join(
-                        self.habitat_derivatives_folder,
-                        f"{self.dem_name}_{key}_{win}.tif"
-                    )
-            else:
-                output_files[key] = os.path.join(
-                    self.habitat_derivatives_folder,
-                    f"{self.dem_name}_{key}.tif"
-                )
+        self.output_files = output_files
+
+    def process_dem(self): 
+        """ Process the DEM to generate habitat derivatives. """
+        output_files = self.output_files
+        input_dem = self.input_dem
+        print()
+        print("Generating products", self.products)
+        print("........", input_dem)
+        
         output_slope=output_files.get("slope")
         output_aspect=output_files.get("aspect")
         output_roughness=output_files.get("roughness")
@@ -196,8 +213,12 @@ class ProcessDem:
         output_dem=output_files.get("dem")
 
         """ Read a DEM and compute slope, aspect, roughness, TPI, and TRI. Output each to TIFF files based on user input. """
-        def generate_products(input_dem, dem_data, transform, verbose):
+        # --- UPDATED GENERATOR: Accepts 'products_to_skip' ---
+        def generate_products(input_dem, dem_data, transform, verbose, products_to_skip=None):
             """ Generator function to yield each product's data and output file path. """
+            if products_to_skip is None:
+                products_to_skip = []
+                
             habitat_derivatives = HabitatDerivatives(
                 input_dem=input_dem,
                 dem_data=dem_data,
@@ -205,31 +226,73 @@ class ProcessDem:
                 transform=transform,
                 verbose=verbose
             )
-            if output_slope:
-                yield habitat_derivatives.calculate_slope(output_slope), output_slope   # Slope
-            if output_aspect:
-                yield habitat_derivatives.calculate_aspect(output_aspect), output_aspect  # Aspect
-            if output_roughness:
-                yield habitat_derivatives.calculate_roughness(output_roughness), output_roughness  # Roughness
-            if output_tpi:
-                yield habitat_derivatives.calculate_tpi(output_tpi), output_tpi  # TPI
-            if output_tri:
-                yield habitat_derivatives.calculate_tri(output_tri), output_tri  # TRI
-            if output_hillshade:
-                yield habitat_derivatives.calculate_hillshade(output_hillshade), output_hillshade # Hillshade
-            # Loop through all shannon window sizes
+            
+            # Note: We check if the KEY (e.g., 'slope') is in the skip list before calculating
+            if output_slope and "slope" not in products_to_skip:
+                yield habitat_derivatives.calculate_slope(output_slope), output_slope
+            if output_aspect and "aspect" not in products_to_skip:
+                yield habitat_derivatives.calculate_aspect(output_aspect), output_aspect
+            if output_roughness and "roughness" not in products_to_skip:
+                yield habitat_derivatives.calculate_roughness(output_roughness), output_roughness
+            if output_tpi and "tpi" not in products_to_skip:
+                yield habitat_derivatives.calculate_tpi(output_tpi), output_tpi
+            if output_tri and "tri" not in products_to_skip:
+                yield habitat_derivatives.calculate_tri(output_tri), output_tri
+            if output_hillshade and "hillshade" not in products_to_skip:
+                yield habitat_derivatives.calculate_hillshade(output_hillshade), output_hillshade
+            
             for win in self.shannon_window:
                 key = f"shannon_index_{win}"
-                if key in output_files:
+                if key in output_files and key not in products_to_skip:
                     yield habitat_derivatives.calculate_shannon_index_2d(win), output_files[key]
-            if output_lbp_3_1:
-                yield habitat_derivatives.calculate_lbp(3, 1), output_lbp_3_1  # LBP
-            if output_lbp_15_2:
-                yield habitat_derivatives.calculate_lbp(15, 2), output_lbp_15_2  # LBP
-            if output_lbp_21_3:
-                yield habitat_derivatives.calculate_lbp(21, 3), output_lbp_21_3  # LBP
-            if output_dem:
-                yield habitat_derivatives.return_dem_data(), output_dem  # used to chunk and merge data to get the same shape output as other products
+            
+            if output_lbp_3_1 and "lbp-3-1" not in products_to_skip:
+                yield habitat_derivatives.calculate_lbp(3, 1), output_lbp_3_1
+            if output_lbp_15_2 and "lbp-15-2" not in products_to_skip:
+                yield habitat_derivatives.calculate_lbp(15, 2), output_lbp_15_2
+            if output_lbp_21_3 and "lbp-21-3" not in products_to_skip:
+                yield habitat_derivatives.calculate_lbp(21, 3), output_lbp_21_3
+            if output_dem and "dem" not in products_to_skip:
+                yield habitat_derivatives.return_dem_data(), output_dem
+            
+            # --- NEW: Landforms / Bathymorphons ---
+            # Check which landforms are needed and not skipped
+            needed_lf = [p for p in ["bathymorphons_raw", "bathymorphons_10c", "bathymorphons_6c", "bathymorphons_5c", "bathymorphons_4c"] 
+                         if p in output_files and p not in products_to_skip]
+            
+            if needed_lf:
+                # Calculate Raw + 10c (ArcPy execution)
+                # Pass 'input_dem' (the chunk path) NOT 'chunk_dem_path'
+                raw_arr, class10_arr = Landforms.calculate_landforms_chunk(
+                    input_dem, 
+                    angle_threshold=1, 
+                    search_distance=10, 
+                    skip_distance=5
+                )
+                
+                if raw_arr is not None:
+                    # Yield Raw
+                    if "bathymorphons_raw" in needed_lf:
+                        yield raw_arr, output_files["bathymorphons_raw"]
+                    
+                    # Yield 10c (from Tool Output)
+                    if class10_arr is not None and "bathymorphons_10c" in needed_lf:
+                        yield class10_arr, output_files["bathymorphons_10c"]
+                        
+                    # Yield Classifications (Derived from Raw)
+                    if "bathymorphons_6c" in needed_lf:
+                        yield Landforms.classify_chunk(raw_arr, "6c"), output_files["bathymorphons_6c"]
+                    
+                    if "bathymorphons_5c" in needed_lf:
+                        yield Landforms.classify_chunk(raw_arr, "5c"), output_files["bathymorphons_5c"]
+                        
+                    if "bathymorphons_4c" in needed_lf:
+                        yield Landforms.classify_chunk(raw_arr, "4c"), output_files["bathymorphons_4c"]
+
+        # Reset Env
+        arcpy.env.outputCoordinateSystem = self.original_spatial_ref
+        arcpy.env.snapRaster = self.original_snap_raster
+        arcpy.env.cellSize = self.original_cell_size
         
         # Set arcpy.env variables before processing
         arcpy.env.outputCoordinateSystem = self.original_spatial_ref
@@ -305,102 +368,83 @@ class ProcessDem:
 
 
         # If we are chunking, we need to process each chunk and then merge them
-        elif self.divisions:
-            # --- 1. Create a temporary folder for DEM chunks ---
-            # Use abspath to ensure we are creating the folder exactly where we think we are
+        if self.divisions:
             dem_dir = os.path.dirname(os.path.abspath(self.input_dem))
             dem_chunk_temp_folder = os.path.join(dem_dir, "temp_dem_chunks_for_processing")
-         
             if not os.path.exists(dem_chunk_temp_folder):
-                try:
-                    os.makedirs(dem_chunk_temp_folder)
-                except OSError as e:
-                    print(f"DEBUG: Failed to create temp folder: {e}")
-                    raise
+                try: os.makedirs(dem_chunk_temp_folder)
+                except OSError: pass
 
-            # --- 2. Calculate Overlap ---
             # Calculate required overlap based on max window size to prevent edge effects
-            # Formula: D = floor(W_max / 2). We add +1 for safety.
-            max_filter_size = max(self.shannon_window) if self.shannon_window else 21
-            overlap_px = (max_filter_size // 2) + 1
-            print(f"Applying overlap of {overlap_px} pixels per tile side to prevent edge effects.")
+            # Formula: D = floor(W_max / 2). We add +1 for safety
+            # 1. Determine Max Window for Overlap
+            max_shannon = max(self.shannon_window) if self.shannon_window else 0
+            
+            # Check if landforms are requested to adjust overlap
+            max_geomorph = 20 if any("bathymorphons" in p for p in self.products) else 0 
+            
+            max_filter_size = max(max_shannon, max_geomorph)
+            overlap_px = int(max_filter_size // 2) + 5 # Add padding
+            
+            print(f"Applying overlap of {overlap_px} pixels per tile side.")
 
-            # --- 3. Process each DEM chunk ---
             with rasterio.open(input_dem) as src:
-                # Get the original DEM's properties for later mosaicking of products
                 original_dem_crs = src.crs
-
-                # Calculate number of tiles in each direction and total tiles
                 tile_size = max(1, src.height // self.divisions)
                 n_tiles_y = (src.height + tile_size - 1) // tile_size
                 n_tiles_x = (src.width + tile_size - 1) // tile_size
                 total_tiles = n_tiles_y * n_tiles_x
                 tile_counter = 0
 
-                # Set arcpy.env variables before processing each chunk
                 arcpy.env.outputCoordinateSystem = self.original_spatial_ref
                 arcpy.env.snapRaster = self.original_snap_raster
                 arcpy.env.cellSize = self.original_cell_size
+                arcpy.env.overwriteOutput = True
 
                 for i in range(0, src.height, tile_size):
                     for j in range(0, src.width, tile_size):
                         tile_counter += 1
-
-                        # --- OPTIMIZATION 1: Check if this tile is already fully processed ---
-                        # This allows "Starting where we left off" efficiently
+                        
+                        # --- OPTIMIZATION 1: Identify Skippable Products ---
+                        products_to_skip = []
                         all_products_exist = True
+                        
                         for prod_key, prod_master_path in output_files.items():
-                            # Reconstruct the expected chunk path for this product
-                            # Master: .../derivatives/name_slope.tif
-                            # Chunk Dir: .../derivatives/name_slope/
-                            # Chunk File: .../derivatives/name_slope/name_slope_chunk_{i}_{j}.tif
-                            
                             prod_dir = os.path.dirname(prod_master_path)
                             prod_name = os.path.basename(prod_master_path).split(".")[0]
                             chunk_folder = os.path.join(prod_dir, prod_name)
                             chunk_path = os.path.join(chunk_folder, f"{prod_name}_chunk_{i}_{j}.tif")
                             
-                            if not os.path.exists(chunk_path):
+                            if os.path.exists(chunk_path):
+                                products_to_skip.append(prod_key)
+                            else:
                                 all_products_exist = False
-                                break
                         
                         if all_products_exist:
-                            message = f"Skipping Tile {tile_counter}/{total_tiles} (Already processed)"
+                            message = f"Skipping Tile {tile_counter}/{total_tiles} (All products exist)"
                             self.message_length = Utils.print_progress(message, self.message_length)
                             continue
-                        # ---------------------------------------------------------------------
-                        # A. Define the "Target" Window (The final output size for this tile)
-                        # This determines where the final pixels go in the mosaic
+                        # -----------------------------------------------------
+
+                        # A. Define Write Window
                         target_width = min(tile_size, src.width - j)
                         target_height = min(tile_size, src.height - i)
                         write_window = Window(j, i, target_width, target_height)
-                        
-                        # Calculate the transform for the FINAL output position
                         write_transform = src.window_transform(write_window)
 
-                        # B. Define the "Read" Window (Target + Overlap)
-                        # Clamp coordinates so we don't go outside the image
+                        # B. Define Read Window
                         read_row_start = max(0, i - overlap_px)
                         read_col_start = max(0, j - overlap_px)
                         read_row_stop = min(src.height, i + target_height + overlap_px)
                         read_col_stop = min(src.width, j + target_width + overlap_px)
-
-                        read_window = Window.from_slices(
-                            (read_row_start, read_row_stop), 
-                            (read_col_start, read_col_stop)
-                        )
+                        read_window = Window.from_slices((read_row_start, read_row_stop), (read_col_start, read_col_stop))
                         
-                        # Calculate offsets: How many pixels did we actually add to the top/left?
-                        # We need this to crop the result later.
                         pad_top = i - read_row_start
                         pad_left = j - read_col_start
-
-                        # Define path for the temporary DEM chunk
+                        
                         chunk_dem_path = os.path.join(dem_chunk_temp_folder, f"{self.dem_name}_chunk_{i}_{j}.tif")
-
-                        # --- OPTIMIZATION 2: Reuse existing temp chunk if available ---
-                        # If the products weren't finished but the raw chunk exists, read it
-                        # instead of hitting the massive original file.
+                        
+                        # Optimization 2: Reuse temp chunk if available
                         chunk_data_padded = None
                         chunk_transform_padded = None
                         
@@ -409,18 +453,13 @@ class ProcessDem:
                                 with rasterio.open(chunk_dem_path) as tmp_src:
                                     chunk_data_padded = tmp_src.read(1)
                                     chunk_transform_padded = tmp_src.transform
-                                # message = f"Processing Tile {tile_counter}/{total_tiles} (Cached Input)"
-                                # self.message_length = Utils.print_progress(message, self.message_length)
-                            except Exception as e:
-                                print(f"Warning: Corrupt temp chunk found, recreating: {e}")
+                            except Exception:
                                 chunk_data_padded = None
 
                         if chunk_data_padded is None:
-                            # C. Read and Save the Buffered Chunk (Original Logic)
                             chunk_data_padded = src.read(1, window=read_window)
                             chunk_transform_padded = src.window_transform(read_window)
                             
-                            # Global Sanitization Fix
                             if np.issubdtype(chunk_data_padded.dtype, np.floating):
                                 with np.errstate(invalid='ignore'):
                                     mask = chunk_data_padded < -15000.0
@@ -428,112 +467,61 @@ class ProcessDem:
                                         chunk_data_padded[mask] = np.nan
 
                             with rasterio.open(
-                                chunk_dem_path, 'w', driver='GTiff',
-                                compress='lzw',
+                                chunk_dem_path, 'w', driver='GTiff', compress='lzw',
                                 height=chunk_data_padded.shape[0], width=chunk_data_padded.shape[1],
                                 count=1, dtype=str(chunk_data_padded.dtype),
                                 crs=original_dem_crs, transform=chunk_transform_padded
                             ) as dst:
                                 dst.write(chunk_data_padded, 1)
-                        # -----------------------------------------------------------
 
-                        message = f"Processing tile {tile_counter}/{total_tiles} (Overlap: {overlap_px}px)"
+                        message = f"Processing tile {tile_counter}/{total_tiles} (Skipping: {len(products_to_skip)})"
                         self.message_length = Utils.print_progress(message, self.message_length)
 
-                        # D. Generate Products on Padded Data
-                        for data, output_file in generate_products(chunk_dem_path, chunk_data_padded, chunk_transform_padded, verbose=False):
-                            # Ensure output folder exists for the product
+                        # D. Generate Products (Pass Skip List)
+                        for data, output_file in generate_products(chunk_dem_path, chunk_data_padded, chunk_transform_padded, verbose=False, products_to_skip=products_to_skip):
                             output_dir = os.path.dirname(output_file)
                             product_name = os.path.basename(output_file).split(".")[0]
-                            
-                            # Define the chunk output file path
                             product_folder = os.path.join(output_dir, product_name)
                             os.makedirs(product_folder, exist_ok=True)
-
                             chunk_output_file = os.path.join(product_folder, f"{product_name}_chunk_{i}_chunk_{j}.tif")
 
-                            # Skip processing if the chunk already exists
-                            if os.path.exists(chunk_output_file):
-                                continue
-                            
                             if data is None:
-                                # --- REPLACE THE ARCPY COPY BLOCK WITH THIS ---
-                                # ArcPy produced a file at 'output_file'. Copy it to chunk output.
-                                # SAFETY CHECK: Ensure the source file actually exists
                                 if arcpy.Exists(output_file):
                                     try:
-                                        # Use management.Copy instead of Copy_management (modern syntax, same underlying tool)
                                         arcpy.management.Copy(output_file, chunk_output_file)
-                                        # Delete immediately to avoid locking/stale data for next loop
                                         arcpy.management.Delete(output_file)
-                                    except Exception as e:
-                                        print(f"\nError copying/deleting chunk {i},{j} for {output_file}: {e}")
-                                else:
-                                    # This can happen if the chunk was empty (NoData) and the tool output nothing
-                                    pass
-
+                                    except Exception: pass
                             else:
-                                # E. Crop the Result
-                                # We calculated on the padded area, now we cut out the center "valid" area
-                                cropped_data = data[
-                                    pad_top : pad_top + target_height, 
-                                    pad_left : pad_left + target_width
-                                ]
+                                cropped_data = data[pad_top : pad_top + target_height, pad_left : pad_left + target_width]
+                                cropped_dem = chunk_data_padded[pad_top : pad_top + target_height, pad_left : pad_left + target_width]
                                 
-                                # --- FIX: APPLY MASK TO CHUNK ---
-                                # Crop the original DEM to the same size to use as a mask
-                                cropped_dem = chunk_data_padded[
-                                    pad_top : pad_top + target_height, 
-                                    pad_left : pad_left + target_width
-                                ]
-                                
-                                # Identify where the DEM is NoData (NaN)
-                                # Note: Assuming input DEM uses NaNs for NoData (standard for floats)
                                 if np.issubdtype(cropped_dem.dtype, np.floating):
                                     mask = np.isnan(cropped_dem)
                                 else:
-                                    # If DEM is integer (less common for bathy), use 0 or user-defined nodata
                                     mask = (cropped_dem == src.nodata) if src.nodata is not None else (cropped_dem == 0)
 
-                                # Apply this mask to the product
                                 if np.issubdtype(cropped_data.dtype, np.floating):
                                     cropped_data[mask] = np.nan
                                     out_nodata = np.nan
                                 else:
-                                    # For Integer products (Hillshade, LBP)
-                                    # We usually use 0 for NoData in Byte rasters
                                     cropped_data[mask] = 0 
                                     out_nodata = 0
-                                # --------------------------------
 
-                                # F. Save the Cropped (Seamless) Chunk
                                 with rasterio.open(
-                                    chunk_output_file,
-                                    'w',
-                                    driver='GTiff',
-                                    compress='lzw',  # <--- ADD THIS
-                                    height=cropped_data.shape[0],
-                                    width=cropped_data.shape[1],
-                                    count=1,
-                                    dtype=cropped_data.dtype,
-                                    crs=original_dem_crs,
-                                    transform=write_transform, # Use the original TARGET transform
-                                    nodata=out_nodata
+                                    chunk_output_file, 'w', driver='GTiff', compress='lzw',
+                                    height=cropped_data.shape[0], width=cropped_data.shape[1],
+                                    count=1, dtype=cropped_data.dtype,
+                                    crs=original_dem_crs, transform=write_transform, nodata=out_nodata
                                 ) as dst:
                                     dst.write(cropped_data, 1)
                                     dst.update_tags(**src.tags())
 
-                                                        # FIX: Check if file exists before trying to Describe it
                             if os.path.exists(chunk_output_file):
                                 try:
                                     out_desc = arcpy.Describe(chunk_output_file)
-                                    assert out_desc.spatialReference.name == self.original_spatial_ref.name, \
-                                        f"Spatial Ref Error: {out_desc.spatialReference.name}"
-                                except Exception as e:
-                                    print(f"Warning: Could not validate chunk {chunk_output_file}: {e}")
+                                except Exception: pass
                             else:
-                                # If the file wasn't created (e.g. copy failed), log it and move on
-                                print(f"Warning: Output chunk was not created for tile {i},{j}. Skipping validation.")
+                                print(f"Warning: Output chunk was not created for tile {i},{j}.")
                             
                 # --- 4. Merge and Clean ---
                 print() # Finalize progress bar
@@ -561,7 +549,8 @@ class ProcessDem:
 
             # Cleanup the temporary raw DEM chunks folder as well
             if 'dem_chunk_temp_folder' in locals():
-                ArcpyUtils.cleanup_chunks(dem_chunk_temp_folder)
+                if not self.save_chunks:
+                    ArcpyUtils.cleanup_chunks(dem_chunk_temp_folder)
 
             # Reset Environment
             arcpy.env.outputCoordinateSystem = self.original_spatial_ref

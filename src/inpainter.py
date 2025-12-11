@@ -37,7 +37,7 @@ class Inpainter:
             raise FileNotFoundError(f"Input raster '{self.input_raster}' does not exist.")
         
         # create the save path if it doesn't exist
-        self.filled_path = os.path.join(os.path.dirname(self.input_raster), "filled")
+        self.filled_path = os.path.join(os.path.dirname(self.input_raster))
         if save_path is None:
             self.save_path = os.path.join(os.path.dirname(self.input_raster), "boundary_files")
         else:
@@ -46,7 +46,7 @@ class Inpainter:
         
         os.makedirs(self.local_temp, exist_ok=True)
         os.makedirs(self.save_path, exist_ok=True)
-        os.makedirs(self.filled_path, exist_ok=True)
+        # os.makedirs(self.filled_path, exist_ok=True)
 
         self.message_length = 0
         self.last_fill_iterations = None

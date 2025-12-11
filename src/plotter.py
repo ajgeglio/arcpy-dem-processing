@@ -8,7 +8,7 @@ from derivatives import HabitatDerivatives
 from rasterUtils import RasterUtils
 from shannon import ShannonDerivatives
 from gdalUtils import GdalUtils
-
+import json
 
 class PlotDEM:
     def __init__(self, dem_path):
@@ -19,14 +19,18 @@ class PlotDEM:
             dem_data = src.read(1)  # Read the DEM data
             transform = src.transform  # Get the affine transform
             crs = src.crs  # Get the coordinate reference system
+            tags = src.tags()
             metadata = src.meta  # Get metadata
             nodata = metadata['nodata']  # Get no-data value
         dem_data = RasterUtils.replace_nodata_with_nan(dem_data, nodata=-9999)
         # Check if the DEM data is empty after filling no-data values
         if RasterUtils.is_empty(dem_data, nodata):
             print("The DEM data is empty after filling no-data values.")
+
+        self.metadata = metadata
         self.dem_data = dem_data
         self.transform = transform
+        self.tags = tags
         self.hd = HabitatDerivatives(self.dem_path, self.dem_data, transform=self.transform)
         self.shannon_tool = ShannonDerivatives(self.dem_data, self.dem_path)
 
@@ -415,6 +419,43 @@ class PlotDEM:
             plt.show()
             
         plt.close(fig)
+
+    def analyze_geomorphon_data(self):
+        """
+        Analyze a classified geomorphon raster and plot a histogram of terrain classes.
+
+        Parameters:
+        raster (str): Path to the classified raster file.
+        """
+        raster_data = self.dem_data
+        metadata = self.metadata
+        tags = self.tags
+
+        value_to_label = json.loads(tags["value_to_label"])
+        label_map = {int(k): v for k, v in value_to_label.items()}
+
+        colors = plt.cm.get_cmap("tab10", 10).colors
+
+        # Mask out nodata values
+        valid_mask = raster_data != metadata.get('nodata', None)
+        masked_data = raster_data[valid_mask]
+
+        fig, ax = plt.subplots()
+        for i, class_id in enumerate(sorted(label_map.keys())):
+            class_data = masked_data[masked_data == class_id]
+            ax.hist(class_data,
+                    bins=np.arange(class_id - 0.5, class_id + 1.5, 1),
+                    color=colors[i % len(colors)],
+                    edgecolor='black',
+                    label=label_map[class_id])
+
+        ax.legend(title="Terrain Classes")
+        ax.set_xlabel("DEM Class ID")
+        ax.set_ylabel("Frequency")
+        ax.set_title("Histogram of Terrain Classes")
+        plt.xticks(range(1, 11))
+        plt.tight_layout()
+        plt.show()
 
 # example usage
 if __name__=="__main__":

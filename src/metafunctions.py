@@ -87,12 +87,11 @@ class MetaFunctions():
         return trimmed_dem_path, intersection_mask, inpainter
     
     @staticmethod
-    def fill_and_return_mask(input_dem, fill_method="IDW", fill_iterations=1, generate_boundary=True):
+    def fill_and_return_mask(input_dem, fill_method="IDW", fill_iterations=1):
         # generate the cleaned data boundary and binary mask tif
         inpainter = Inpainter(input_dem)
 
-        if generate_boundary:
-            binary_mask, dissolved_polygon = inpainter.get_data_boundary(min_area=50)
+        binary_mask, dissolved_polygon = inpainter.get_data_boundary(min_area=50)
 
         if fill_method is not None:
             # Generate the fill raster

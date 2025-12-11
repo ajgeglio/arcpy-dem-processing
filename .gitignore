@@ -18,7 +18,6 @@ saga-9.8.0_x64/
 *.pickle
 *.eps
 BRESS.2.5.4*
-*backup*
 *.aux.xml
 *.aux
 .vscode/

@@ -47,7 +47,10 @@ class ProcessDem:
         products=None,
         fill_method=None,
         fill_iterations=1,
-        save_chunks=False
+        keep_chunks=False,
+        bypass_depth=False,
+        bypass_mosaic=False,
+        water_elevation=183.6
     ):
         """
         Initialize the HabitatDerivatives class.
@@ -77,7 +80,8 @@ class ProcessDem:
                 "Spatial Ref not matching! You can use the function RasterUtils.transform_spatial_reference_arcpy(base_raster, transform_raster)"
             
         # converts to depth if it is in elevation
-        self.input_dem = ArcpyUtils.apply_height_to_depth_transformation(self.input_dem, water_elevation=183.6)
+        if not bypass_depth:
+            self.input_dem = ArcpyUtils.apply_height_to_depth_transformation(self.input_dem, water_elevation)
 
         self.dem_name = Utils.sanitize_path_to_name(self.input_dem)
         dem_desc = arcpy.Describe(self.input_dem)
@@ -94,6 +98,7 @@ class ProcessDem:
         print(f"ArcPy environment synchronized to: {self.input_dem}")
         
         self.use_gdal = use_gdal
+        self.bypass_mosaic = bypass_mosaic
         self.divisions = divisions
         self.output_folder = output_folder
         if self.output_folder is None:
@@ -119,7 +124,7 @@ class ProcessDem:
         self.products = products if products is not None else []
         self.fill_iterations = fill_iterations  # Number of iterations for filling gaps
         self.fill_method = fill_method # IDW or FocalStatistics or None
-        self.save_chunks = save_chunks
+        self.keep_chunks = keep_chunks
         self.message_length = 0
 
         # Initialize inpainter and binary mask according to the input parameters
@@ -137,7 +142,7 @@ class ProcessDem:
 
         elif self.input_dem and not self.input_bs and not self.binary_mask:
             if fill_method is not None:
-                trimmed_dem_path, binary_mask, inpainter = MetaFunctions.fill_and_return_mask(self.input_dem, fill_method, fill_iterations)
+                trimmed_dem_path, inpainter, self.binary_mask = MetaFunctions.fill_and_return_mask(self.input_dem, fill_method, fill_iterations)
             if fill_method is None:
                 print("Generating the binary mask from the inpur raster, no filling")
                 trimmed_dem_path = self.input_dem
@@ -172,6 +177,11 @@ class ProcessDem:
                 for p in ["bathymorphons_raw", "bathymorphons_10c", "bathymorphons_6c", "bathymorphons_5c", "bathymorphons_4c"]:
                     if p not in self.products:
                         self.products.append(p)
+            # 2. Expand "lbp" -> "lbp-21-4"
+            if "lbp" in self.products:
+                self.products.remove("lbp")
+                if "lbp-21-4" not in self.products:
+                    self.products.append("lbp-21-4")
 
         # Output file paths
         output_files = {}
@@ -210,7 +220,6 @@ class ProcessDem:
         output_lbp_8_1=output_files.get("lbp-8-1")
         output_lbp_15_2=output_files.get("lbp-15-2")
         output_lbp_21_4=output_files.get("lbp-21-4")
-        output_lbp=output_files.get("lbp-21-4")
         output_dem=output_files.get("dem")
 
         """ Read a DEM and compute slope, aspect, roughness, TPI, and TRI. Output each to TIFF files based on user input. """
@@ -252,8 +261,6 @@ class ProcessDem:
             if output_lbp_15_2 and "lbp-15-2" not in products_to_skip:
                 yield habitat_derivatives.calculate_lbp(15, 2), output_lbp_15_2
             if output_lbp_21_4 and "lbp-21-4" not in products_to_skip:
-                yield habitat_derivatives.calculate_lbp(21, 4), output_lbp_21_4
-            if output_lbp and "lbp" not in products_to_skip:
                 yield habitat_derivatives.calculate_lbp(21, 4), output_lbp_21_4
             if output_dem and "dem" not in products_to_skip:
                 yield habitat_derivatives.return_dem_data(), output_dem
@@ -533,7 +540,7 @@ class ProcessDem:
                     # Determine the folder where chunks are stored
                     dem_chunks_path = os.path.join(os.path.dirname(output_file), os.path.basename(output_file).split(".")[0])
                     
-                    if os.path.exists(dem_chunks_path): 
+                    if os.path.exists(dem_chunks_path) and not self.bypass_mosaic: 
                         # STEP A: Merge, but DO NOT let the utility delete chunks yet (prevents the crash)
                         merged_dem = ArcpyUtils.merge_dem_arcpy(dem_chunks_path, remove_chunks=False)
                         
@@ -552,7 +559,7 @@ class ProcessDem:
 
             # Cleanup the temporary raw DEM chunks folder as well
             if 'dem_chunk_temp_folder' in locals():
-                if not self.save_chunks:
+                if not self.keep_chunks:
                     ArcpyUtils.cleanup_chunks(dem_chunk_temp_folder)
 
             # Reset Environment

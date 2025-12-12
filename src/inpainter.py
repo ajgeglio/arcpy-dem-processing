@@ -48,6 +48,16 @@ class Inpainter:
         os.makedirs(self.save_path, exist_ok=True)
         # os.makedirs(self.filled_path, exist_ok=True)
 
+        # --- FIX: Create a Temp FileGDB for massive intermediate data ---
+        # Shapefiles have a 2GB limit, and "in_memory" crashes RAM.
+        # FileGDB is the only safe place for this scale of data.
+        self.temp_gdb = os.path.join(self.local_temp, "intermediate_calc.gdb")
+        if not arcpy.Exists(self.temp_gdb):
+            try:
+                arcpy.management.CreateFileGDB(self.local_temp, "intermediate_calc.gdb")
+            except Exception as e:
+                print(f"Warning: Could not create temp GDB: {e}")
+
         self.message_length = 0
         self.last_fill_iterations = None
         arcpy.env.workspace = self.local_temp
@@ -78,8 +88,8 @@ class Inpainter:
             arcpy.AddError(f"Input mask polygon '{input_mask}' does not exist.")
             quit()
         
-        temp_points_fc = None # Initialize for the finally block
         current_raster = input_raster
+        temp_points_fc = None # Initialize for the finally block
 
         try:
             arcpy.AddMessage(f"Starting DEM gap filling using IDW for {iterations} iteration(s)...")
@@ -104,22 +114,30 @@ class Inpainter:
             for i in range(iterations):
                 arcpy.AddMessage(f"IDW iteration {i+1} of {iterations}...")
 
-                # Convert DEM to points (valid cells only)
-                temp_points_fc = arcpy.CreateUniqueName(f"dem_idw_pts_{i}", "in_memory")
-                # Only use valid (non-NoData) cells for points
+                # --- FIX: Write points to Temp GDB instead of in_memory ---
+                temp_point_name = f"dem_idw_pts_{i}"
+                if arcpy.Exists(self.temp_gdb):
+                    temp_points_fc = os.path.join(self.temp_gdb, temp_point_name)
+                else:
+                    # Fallback to temp folder (will be shapefile, might hit 2GB limit)
+                    temp_points_fc = os.path.join(self.local_temp, f"{temp_point_name}.shp")
+
+                if arcpy.Exists(temp_points_fc):
+                    arcpy.management.Delete(temp_points_fc)
+
+                # Only use valid cells
                 arcpy.conversion.RasterToPoint(
                     in_raster=arcpy.sa.SetNull(current_raster, current_raster, "VALUE IS NULL"),
                     out_point_features=temp_points_fc,
                     raster_field="VALUE"
                 )
 
-                point_count_result = arcpy.management.GetCount(temp_points_fc)
-                point_count = int(point_count_result.getOutput(0))
+                point_count = int(arcpy.management.GetCount(temp_points_fc).getOutput(0))
                 if point_count == 0:
-                    arcpy.AddError("No valid data points were generated from the DEM (this can occur if the DEM "
-                                "has no data within the mask or is entirely NoData). IDW requires input points. Cannot proceed.")
-                    return False 
-                arcpy.AddMessage(f"{point_count} points generated for IDW processing.")
+                    arcpy.AddError("No valid data points generated. Cannot run IDW.")
+                    return None
+                
+                arcpy.AddMessage(f"{point_count} points generated. Running IDW...")
 
                 # Run IDW interpolation
                 idw_search_radius_obj = arcpy.sa.RadiusFixed(search_radius_fixed_units)
@@ -165,8 +183,6 @@ class Inpainter:
             arcpy.env.extent = original_settings["extent"]
             arcpy.env.workspace = original_settings["workspace"]
             arcpy.env.scratchWorkspace = original_settings["scratchWorkspace"]
-            arcpy.CheckInExtension("Spatial")
-            arcpy.AddMessage("Environment settings reset and Spatial Analyst extension checked in.")
             arcpy.AddMessage("Process finished.")
 
     def impute_gaps_focal_statistics(self, input_tif, iterations, snap_raster=None):
@@ -223,19 +239,13 @@ class Inpainter:
     def fill_internal_gaps_arcpy(self, input_mask, method="IDW", iterations=1, idw_power=2.0, search_radius=5.0):
         """Fill internal gaps in the DEM using smoothing and filling."""
         self.last_fill_iterations = iterations
-        # Store original environment settings to restore them later
-        original_settings = {
-            "outputCoordinateSystem": arcpy.env.outputCoordinateSystem,
-            "snapRaster": arcpy.env.snapRaster,
-            "cellSize": arcpy.env.cellSize,
-            "overwriteOutput": arcpy.env.overwriteOutput,
-            "workspace": arcpy.env.workspace,
-            "scratchWorkspace": arcpy.env.scratchWorkspace,
-            "extent": arcpy.env.extent,
-            "mask": arcpy.env.mask
-        }
+        
+        # Create filled folder lazy
+        if not os.path.exists(self.filled_path):
+            os.makedirs(self.filled_path, exist_ok=True)
+
         try:
-            # Set environment to match original DEM
+            # Environment setup
             dem_desc = arcpy.Describe(self.input_raster)
             arcpy.env.outputCoordinateSystem = dem_desc.spatialReference
             arcpy.env.snapRaster = self.input_raster
@@ -243,64 +253,38 @@ class Inpainter:
             arcpy.env.overwriteOutput = True
             arcpy.env.workspace = self.local_temp
             arcpy.env.scratchWorkspace = self.temp_workspace
-            arcpy.env.extent = arcpy.Describe(self.input_raster).extent
+            arcpy.env.extent = dem_desc.extent
             arcpy.env.mask = input_mask if method == "IDW" else None
+            
             input_tif = self.input_raster
             filled_raster_path = os.path.join(self.filled_path, f"{self.dem_name}_filled.tif")
             
-            # Step 1: Verify the input raster
             self.message_length = Utils.print_progress("Verifying input raster...", self.message_length)
-            if not arcpy.Exists(input_tif):
-                raise FileNotFoundError(f"Input raster not found: {input_tif}")
-            try:
-                if method == "FocalStatistics":
-                    filled_raster = self.impute_gaps_focal_statistics(input_tif, iterations=iterations)
-                elif method == "IDW":
-                    filled_raster = self.impute_dem_gaps_idw(input_tif, input_mask, idw_power=idw_power, search_radius_fixed_units=search_radius, iterations=iterations)
+            
+            filled_raster = None
+            if method == "FocalStatistics":
+                filled_raster = self.impute_gaps_focal_statistics(input_tif, iterations=iterations)
+                # --- FIX: Clip the expansion back to the boundary ---
+                # Since IDW works with this mask, we know the mask covers the valid area + internal holes, so trimming to it is safe.
+                if input_mask and arcpy.Exists(input_mask):
+                    arcpy.AddMessage("Clipping Focal Statistics expansion to boundary mask...")
+                    filled_raster = arcpy.sa.ExtractByMask(filled_raster, input_mask)
+            elif method == "IDW":
+                filled_raster = self.impute_dem_gaps_idw(input_tif, input_mask, idw_power, search_radius, iterations)
+            
+            # --- FIX: Check for failure before saving ---
+            if filled_raster is None:
+                raise RuntimeError(f"Gap filling failed using method: {method}. Check logs/memory.")
                 
-                # --- 5. Save the output raster ---
-                filled_raster.save(filled_raster_path)
-                arcpy.AddMessage(f"Saved filled DEM to: '{filled_raster_path}'...")
-                arcpy.AddMessage(f"Filled DEM '{os.path.basename(filled_raster_path)}' saved successfully.")
-                arcpy.AddMessage("DEM gap filling process completed successfully.")
+            filled_raster.save(filled_raster_path)
+            arcpy.AddMessage(f"Saved filled DEM to: '{filled_raster_path}'")
 
-                # Assert spatial reference, cell size, and snap raster are unchanged
-                out_desc = arcpy.Describe(filled_raster_path)
-                assert out_desc.spatialReference.name == self.original_spatial_ref.name, \
-                    f"Spatial reference changed! Expected: {self.original_spatial_ref.name}, Got: {out_desc.spatialReference.name}"
-                # Optionally, check cell size (as string for float comparison)
-                cell_size_x = arcpy.management.GetRasterProperties(filled_raster_path, "CELLSIZEX").getOutput(0)
-                assert str(cell_size_x) == str(self.original_cell_size), \
-                    f"Cell size changed! Expected: {self.original_cell_size}, Got: {cell_size_x}"
-                # Snap raster is an environment setting, not a property of the raster, so just ensure it's set
-                if str(arcpy.env.snapRaster) != str(self.original_snap_raster):
-                    print(f"DEBUG: Snap raster mismatch!")
-                    print(f"Expected: {self.original_snap_raster}")
-                    print(f"Got: {arcpy.env.snapRaster}")
-                    # Only raise an error if the difference is more than just case
-                    if str(arcpy.env.snapRaster).lower() == str(self.original_snap_raster).lower():
-                        print("WARNING: Snap raster paths differ only by case. This is usually not an issue on Windows.")
-                        # Do not raise an error, continue
-                    else:
-                        raise AssertionError(
-                            f"Snap raster changed! Expected: {self.original_snap_raster}, Got: {arcpy.env.snapRaster}"
-                        )
-                return filled_raster_path
+            return filled_raster_path
 
-            except Exception as e:
-                print(f"An error occurred: {e}")
-
-        finally:
-            # Restore environment settings
-            arcpy.env.outputCoordinateSystem = original_settings["outputCoordinateSystem"]
-            arcpy.env.snapRaster = original_settings["snapRaster"]
-            arcpy.env.cellSize = original_settings["cellSize"]
-            arcpy.env.overwriteOutput = original_settings["overwriteOutput"]
-            arcpy.env.workspace = original_settings["workspace"]
-            arcpy.env.scratchWorkspace = original_settings["scratchWorkspace"]
-            arcpy.env.extent = original_settings["extent"]
-            arcpy.env.mask = original_settings["mask"]
-
+        except Exception as e:
+            print(f"Fill Error: {e}")
+            raise # Raise to stop execution if fill is critical
+        
     def create_binary_mask(self, input_raster, boundary_shapefile):
         """Create a binary mask using the input raster extents and a boundary shapefile."""
         message = "Creating binary mask..."
@@ -491,12 +475,7 @@ class Inpainter:
             temp_integer_raster = os.path.join(self.local_temp, "integer.tif")
             message = "Converting raster to integer type..."
             self.message_length = Utils.print_progress(message, self.message_length)
-            # --- FIX START ---
-            # Old Code (Caused the square box issue):
-            # data_mask = arcpy.sa.Con(arcpy.sa.IsNull(self.input_raster), 0, 1)
-            # temp_integer_raster = arcpy.sa.Int(data_mask)
-            
-            # New Code: 
+
             # If input is Null, result is Null. If input has data, result is 1.
             # SetNull(condition, value_if_false) -> If IsNull is true, set to Null. Else 1.
             data_mask = arcpy.sa.SetNull(arcpy.sa.IsNull(self.input_raster), 1)

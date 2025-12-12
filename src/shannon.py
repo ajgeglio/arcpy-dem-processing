@@ -14,6 +14,7 @@ Dependencies:
 """
 
 import os
+import tempfile
 import numpy as np
 from scipy import ndimage
 from scipy.stats import entropy
@@ -287,66 +288,82 @@ class ShannonDerivatives:
     def calculate_flow_direction_arcpy(self):
         """
         Calculate Flow Direction using ArcPy Spatial Analyst.
-        Dependencies: ArcPy, GDAL.
-        Pros: Most robust for large data, handles NoData natively via C++.
-        Cons: Disk I/O overhead.
-        
-        Note: Bypasses 'Pixel Block' memory limits by saving to disk and reading back via GDAL.
+        Explicitly handles workspaces to prevent 'Invalid Output Workspace' errors
+        caused by cleanup scripts deleting previous scratch folders.
         """
-        if not arcpy: raise ImportError("ArcPy is not installed.")
-        if not self.input_dem_path: raise ValueError("input_dem_path is required for ArcPy method.")
-
-        # Capture Global Environment
-        global_extent = arcpy.env.extent
-        global_snap = arcpy.env.snapRaster
-        global_cell = arcpy.env.cellSize
-        temp_flow_path = None
+        import uuid
+        
+        # 1. Capture Global Environment (Everything that might affect execution)
+        global_env = {
+            "extent": arcpy.env.extent,
+            "snapRaster": arcpy.env.snapRaster,
+            "cellSize": arcpy.env.cellSize,
+            "workspace": arcpy.env.workspace,         # <--- Capture this
+            "scratchWorkspace": arcpy.env.scratchWorkspace # <--- Capture this
+        }
+        
+        # 2. Setup Safe Temp Paths
+        # Use system temp dir which is guaranteed to exist and be writable
+        safe_temp_dir = tempfile.gettempdir()
+        temp_flow_name = f"flow_{uuid.uuid4().hex[:8]}.tif"
+        temp_flow_path = os.path.join(safe_temp_dir, temp_flow_name)
 
         try:
-            # Load Raster via ArcPy
-            input_raster = arcpy.Raster(self.input_dem_path)
+            # 3. Force Environment to Safe Settings
+            # This overrides any stale paths pointing to deleted folders (like local_temp)
+            arcpy.env.workspace = safe_temp_dir
+            arcpy.env.scratchWorkspace = safe_temp_dir
             
-            # CRITICAL: Force environment to local chunk extent
+            # Set Grid settings
+            input_raster = arcpy.Raster(self.dem_path)
             arcpy.env.extent = input_raster.extent
             arcpy.env.snapRaster = input_raster
             arcpy.env.cellSize = input_raster
 
-            # Sanitize: Handle deep negative values
+            # 4. Sanitize Data
             clean_raster = arcpy.sa.SetNull(input_raster < -15000.0, input_raster)
             
-            # Execute Tool
-            flow_dir_raster = arcpy.sa.FlowDirection(clean_raster, force_flow="NORMAL")
+            # 5. Run Flow Direction
+            # Now ArcPy will write its internal scratch files to safe_temp_dir, avoiding the crash.
+            flow_dir_obj = arcpy.sa.FlowDirection(clean_raster, force_flow="NORMAL")
             
-            # Save to temp file
-            temp_flow_path = self.input_dem_path.replace(".tif", "_flow_temp.tif")
-            if arcpy.Exists(temp_flow_path):
-                arcpy.management.Delete(temp_flow_path)
-            flow_dir_raster.save(temp_flow_path)
+            # Save output explicitly
+            flow_dir_obj.save(temp_flow_path)
             
-            # Read back via GDAL
+            # 6. Read back using GDAL
             ds = gdal.Open(temp_flow_path)
-            if ds is None: raise RuntimeError("GDAL failed to open temp flow raster.")
-            flow_dir_arr = ds.GetRasterBand(1).ReadAsArray()
+            if ds is None:
+                raise RuntimeError(f"Failed to open temp flow raster: {temp_flow_path}")
+                
+            band = ds.GetRasterBand(1)
+            flow_dir_arr = band.ReadAsArray()
+            
+            # Handle NoData
+            nd = band.GetNoDataValue()
+            if nd is not None:
+                flow_dir_arr[flow_dir_arr == nd] = 0
+                
             ds = None 
-
-            return flow_dir_arr.astype(np.int32)
 
         except Exception as e:
             print(f"ArcPy Flow Direction Error: {e}")
             raise
+            
         finally:
-            # Restore Environment
-            arcpy.env.extent = global_extent
-            arcpy.env.snapRaster = global_snap
-            arcpy.env.cellSize = global_cell
+            # 7. Restore Global Environment
+            # This puts things back so the rest of the script isn't affected
+            for key, value in global_env.items():
+                setattr(arcpy.env, key, value)
             
             # Cleanup
-            if temp_flow_path and arcpy.Exists(temp_flow_path):
-                try: arcpy.management.Delete(temp_flow_path)
-                except: pass
-                if os.path.exists(temp_flow_path):
+            if os.path.exists(temp_flow_path):
+                try:
+                    arcpy.management.Delete(temp_flow_path)
+                except:
                     try: os.remove(temp_flow_path)
                     except: pass
+
+        return flow_dir_arr.astype(np.int32)
 
     # ==========================================================================
     # SHANNON ENTROPY METHODS

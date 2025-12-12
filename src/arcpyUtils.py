@@ -129,7 +129,7 @@ class ArcpyUtils:
             'U8': '8_BIT_UNSIGNED', 'S8': '8_BIT_SIGNED',
             'U16': '16_BIT_UNSIGNED', 'S16': '16_BIT_SIGNED',
             'U32': '32_BIT_UNSIGNED', 'S32': '32_BIT_SIGNED',
-            'F32': '32_BIT_FLOAT', 'F64': '64_BIT_FLOAT'
+            'F32': '32_BIT_FLOAT', 'F64': '32_BIT_FLOAT'  # <--- CRITICAL FIX: Downcast F64 to F32
         }
         # Fallback if specific mapping is needed, usually ArcPy handles some, 
         # but safe to map the common ones:

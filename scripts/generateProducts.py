@@ -24,8 +24,11 @@ def main():
     parser.add_argument("--shannon_window", type=int, nargs="+", default=[3, 9, 21], help="Window sizes for shannon index (e.g. 3 9 21).")
     parser.add_argument("--fill_method", type=str, default="IDW", choices=["IDW", "FocalStatistics", "NoFill"], help="Method to fill voids in the DEM, or skip filling with NoFill.")
     parser.add_argument("--fill_iterations", type=int, default=1, help="Number of iterations for filling voids in the DEM.")
-    parser.add_argument("--save_chunks", action="store_true", help="Save the DEM chunks after mosaic. Best to do this during testing of large products.")
-    
+    parser.add_argument("--keep_chunks", action="store_true", help="Save the DEM chunks. Best to do this during testing of large products.")
+    parser.add_argument("--bypass_depth", action="store_true", help="Bypass creation of the depth raster, the default behavior is to convert to depth if elevation DEM is given.")
+    parser.add_argument("--water_elevation", type=int, default=183.6, help="Water elevation (m) for the depth raster, default is the a high elevation marker for the Great Lakes")
+    parser.add_argument("--bypass_mosaic", action="store_true", help="Bypass creation of the depth raster, the default behavior is to convert to depth if elevation DEM is given.")
+
     # Updated choices to include landform options
     parser.add_argument("--products", type=str, nargs="+", 
                         default=["slope", "aspect", "roughness", "tpi", "tri", "hillshade"],
@@ -43,11 +46,18 @@ def main():
     # Parse arguments
     args = parser.parse_args()
     
+    # Setup Variables
     INPUT_DEM = args.input_dem
     INPUT_BS = args.input_bs if args.input_bs else None
     BINARY_MASK = args.input_binary_mask if args.input_binary_mask else None
     RASTER_DIR = os.path.dirname(os.path.abspath(INPUT_DEM))
     PRODUCTS = args.products
+    BYPASSDEPTH = args.bypass_depth
+    BYPASSMOSAIC = args.bypass_mosaic
+    DIVISIONS = args.divisions   
+    SHANNON_WIN = args.shannon_window
+    KEEP_CHUNKS = args.keep_chunks
+    WATERELEVATION = args.water_elevation
 
     # Basic validation
     if not INPUT_DEM:
@@ -77,10 +87,6 @@ def main():
 
     print("Cleanup Complete.")
 
-    # Setup Variables
-    DIVISIONS = args.divisions   
-    SHANNON_WIN = args.shannon_window
-    SAVE_CHUNKS = args.save_chunks
     FILL_METHOD = args.fill_method
     if FILL_METHOD == "NoFill":
         FILL_METHOD = None
@@ -110,7 +116,10 @@ def main():
                                 fill_method=FILL_METHOD,
                                 fill_iterations=FILL_ITERATIONS,
                                 divisions=DIVISIONS,
-                                save_chunks=SAVE_CHUNKS
+                                keep_chunks=KEEP_CHUNKS,
+                                bypass_depth=BYPASSDEPTH,
+                                bypass_mosaic=BYPASSMOSAIC,
+                                water_elevation=WATERELEVATION
                                 )
         generateDerivatives.process_dem()
 

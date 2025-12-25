@@ -114,6 +114,24 @@ python scripts/generateProducts.py \
   --products slope bathymorphons
 ```
 
+## 4. Multiscale Processing - Jupyter Notebook
+### 📂 Expected File Tree Structure
+
+```text
+C:\path\to\base\directory\           <-- BASE_DIR
+└── MissionPoint\                    <-- REEF_NAME
+    ├── 1m\                          <-- TARGET_RESOLUTIONS[0]
+    │   ├── MP_1m_BY.tif             <-- (ABRV + Res + DEM_MARKER)
+    │   └── MP_1m_BS.tif             <-- (ABRV + Res + BS_MARKER)
+    │
+    ├── 0.5m\                        <-- TARGET_RESOLUTIONS[1]
+    │   ├── MP_0.5m_BY.tif
+    │   └── MP_0.5m_BS.tif
+    │
+    └── 0.25m\                       <-- TARGET_RESOLUTIONS[2]
+        ├── MP_0.25m_BY.tif
+        └── MP_0.25m_BS.tif
+```
 ## Methodology & Workflow
 
 To ensure statistical validity and seamless output, the tool applies the following processing chain:
@@ -172,5 +190,4 @@ This software has been approved for release by the U.S. Geological Survey (USGS)
 
 *   **Anthony Geglio** (ageglio@mtu.edu)
 *   **Peter Esselman** - USGS Great Lakes Science Center
-
 *   **Advanced Technology Lab** - Ann Arbor, MI

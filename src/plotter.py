@@ -3,10 +3,6 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap
 import matplotlib.patches as mpatches
-import json
-import os
-
-# Ensure your local modules are imported
 from landforms import Landforms 
 from utils import Utils
 from gdalUtils import GdalUtils
@@ -15,7 +11,7 @@ from derivatives import HabitatDerivatives
 from shannon import ShannonDerivatives
 
 class PlotDEM:
-    def __init__(self, dem_path):
+    def __init__(self, dem_path, figsize=(11,8)):
         self.dem_path = dem_path
 
         ## creating DEM data array object
@@ -37,6 +33,7 @@ class PlotDEM:
                 # For integer DEMs, keep as is or use a mask
                 pass
         
+        self.figsize = figsize
         self.dem_data = dem_data
         
         self.hd = HabitatDerivatives(self.dem_path, self.dem_data, transform=self.transform)
@@ -62,7 +59,7 @@ class PlotDEM:
         cmap.set_under(color='none')  # Set color for values below the minimum (zero)
 
         # Plot DEM heatmap
-        fig, ax = plt.subplots(figsize=(10, 8))
+        fig, ax = plt.subplots(figsize=self.figsize)
         heatmap = ax.imshow(dem_array, cmap=cmap, interpolation='none', vmin=vmin, vmax=vmax, alpha=0.7)  # DEM background
         plt.colorbar(heatmap, ax=ax, label="Elevation (m)")
         ax.set_title(title)
@@ -125,7 +122,7 @@ class PlotDEM:
         # Mask NaNs so they appear white
         lbp_masked = np.ma.masked_invalid(lbp_array)
 
-        fig, ax = plt.subplots(figsize=(12, 10))
+        fig, ax = plt.subplots(figsize=self.figsize)
 
         # 2. Configure Colormap based on method
         if method == 'uniform' or method == 'nri_uniform':
@@ -177,7 +174,7 @@ class PlotDEM:
         """
         
         flow_array = self.shannon_tool.calculate_flow_direction_arcpy()
-        fig, ax = plt.subplots(figsize=(10, 8))
+        fig, ax = plt.subplots(figsize=self.figsize)
         custom_cmap = ListedColormap([
             (0, 0, 0, 0), "#440154", "#31688E", "#35B779", "#FDE725",
             "#DCE319", "#F8961E", "#D41159", "#6A00A8"
@@ -219,7 +216,7 @@ class PlotDEM:
         # Set the color for masked values (the background) to white (or 'none' for transparent)
         cmap.set_bad(color='white') 
         
-        fig, ax = plt.subplots(figsize=(10, 8))
+        fig, ax = plt.subplots(figsize=self.figsize)
         
         # Plot the masked array
         # vmin=0 is fine because the actual 0s are now masked out
@@ -304,7 +301,7 @@ class PlotDEM:
                 cmap = plt.cm.jet
                 cmap.set_bad(color='white') # Show NoData as white
 
-                fig, ax = plt.subplots(figsize=(10, 8))
+                fig, ax = plt.subplots(figsize=self.figsize)
                 
                 # Compute robust vmin/vmax to ignore outliers in visualization
                 # (TRI/Slope often have massive outliers at edges)
@@ -443,7 +440,7 @@ class PlotDEM:
             morph_masked = np.ma.masked_equal(plot_data, 0)
 
             # 4. Plotting
-            fig, ax = plt.subplots(figsize=(12, 10))
+            fig, ax = plt.subplots(figsize=self.figsize)
             
             im = ax.imshow(morph_masked, cmap=cmap, interpolation='nearest', 
                            vmin=vmin, vmax=vmax)

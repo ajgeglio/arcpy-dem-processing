@@ -1,7 +1,7 @@
 import arcpy
-from arcpy.sa import Raster, SetNull, Con, IsNull, Minus, Times # Make sure 'Minus' and 'Raster' are imported
+from arcpy.sa import Raster, SetNull, Con, IsNull, Minus, Times
 import os
-from utils import Utils  # Assuming Utils is defined in src/utils.py
+from utils import Utils
 import shutil
 import time
 import shutil
@@ -21,13 +21,18 @@ class ArcpyUtils:
         # Check if the raster exists and is valid
         if not arcpy.Exists(input_raster_path):
             raise FileNotFoundError(f"Input raster not found at: {input_raster_path}")
+        
         raster_dir = os.path.dirname(input_raster_path)
         raster_name = Utils.sanitize_path_to_name(input_raster_path)
+        
         output_raster_path = os.path.join(raster_dir, f"{raster_name}_depth.tif")
+        
+        if os.path.exists(output_raster_path):
+            print(f"Depth raster already exists at: {output_raster_path}")
+            print("Skipping conversion and statistics calculation.")
+            return output_raster_path
 
         # Use arcpy to get raster statistics (min/max)
-        arcpy.env.overwriteOutput = True
-        # --- FIX: Ensure Statistics Exist ---
         try:
             # Attempt to read statistics first
             min_val = float(arcpy.management.GetRasterProperties(input_raster_path, "MINIMUM").getOutput(0))
@@ -221,42 +226,68 @@ class ArcpyUtils:
         nodata_mask.save(output_mask_path)
         return output_mask_path
     
-    def create_binary_mask(input_raster, data_value=1, nodata_value=0):
+    @staticmethod
+    def create_binary_mask(input_raster, data_value=1, nodata_value=0, is_derivative=False):
         """
-        Creates a binary mask raster where valid data is assigned 'data_value' (e.g., 1) 
-        and NoData areas are assigned 'nodata_value' (e.g., 0).
-        
-        Args:
-            input_raster_path (str): Path to the input DEM or raster.
-            output_mask_path (str): Path to save the output binary mask raster.
-            data_value (int): The value to assign to valid data areas.
-            nodata_value (int): The value to assign to the raster's original NoData areas.
+        Creates a binary mask. Filters out:
+        1. Large Artifacts (> 100,000)
+        2. Strict Zeros (Background)
+        3. Standard NoData
         """
-        
+        import arcpy
+        from arcpy.sa import Raster, Con, IsNull, Abs
+
         arcpy.env.overwriteOutput = True
         
-        # 1. Read the input raster
         in_raster = Raster(input_raster)
+        
+        print(f"Generating mask for: {os.path.basename(input_raster)}")
 
-        # 2. Check for Null (NoData) values using IsNull
-        # This creates a temporary boolean raster: 1 where NoData, 0 where data exists.
-        is_null_raster = IsNull(in_raster)
+        # --- FIX: ADD ZERO CHECK ---
+        # 1. Abs(x) > 100000  -> Catches 3.4e38 artifacts
+        # 2. IsNull(x)        -> Catches standard NoData
+        # 3. (x == 0)         -> Catches background that lost its NoData tag
         
-        # 3. Use Con (Conditional) to assign the final values
-        # The logic is: 
-        #   IF is_null_raster == 1 (i.e., IF the original pixel was NoData), assign nodata_value (0).
-        #   ELSE (i.e., IF the original pixel was Data), assign data_value (1).
-        binary_mask = Con(is_null_raster, nodata_value, data_value)
+        is_garbage = (Abs(in_raster) > 100000) | IsNull(in_raster) | (in_raster == 0)
         
-        # 4. Save the final output raster
-        # Note: Use a low-memory integer type (e.g., "8_BIT_UNSIGNED") for binary masks
+        binary_mask = Con(is_garbage, nodata_value, data_value)
+        
+        # Save Output
         name = Utils.sanitize_path_to_name(input_raster)
-        output_mask_path = os.path.join(os.path.dirname(input_raster), "boundary_files", f"{name}_binary_mask.tif") 
-        os.makedirs(os.path.dirname(output_mask_path), exist_ok=True)  # Ensure the directory exists
+        if is_derivative:
+            output_mask_path = os.path.join(os.path.dirname(os.path.dirname(input_raster)), "boundary_files", f"{name}_binary_mask.tif") 
+        else:
+            output_mask_path = os.path.join(os.path.dirname(input_raster), "boundary_files", f"{name}_binary_mask.tif") 
+        os.makedirs(os.path.dirname(output_mask_path), exist_ok=True)
+        
         binary_mask.save(output_mask_path)
         
-        print(f"✅ Binary mask created and saved to: {output_mask_path}")
+        try:
+            arcpy.management.SetRasterProperties(output_mask_path, nodata=str(nodata_value))
+        except: pass
+            
         return output_mask_path
+    
+    @staticmethod
+    def trim_raster(input_raster_path, binary_mask, overwrite=False):
+        name = Utils.sanitize_path_to_name(input_raster_path)
+        save_path = os.path.dirname(input_raster_path)
+        trimmed_raster_path = os.path.join(save_path, f"{name}_trimmed.tif")
+        
+        # Basic trim logic
+        arcpy.env.snapRaster = input_raster_path
+        arcpy.env.overwriteOutput = True
+        
+        mask = Raster(binary_mask)
+        valid_mask = SetNull(mask == 0, mask)
+        trimmed = Raster(input_raster_path) * valid_mask
+        trimmed.save(trimmed_raster_path)
+        
+        if overwrite:
+            arcpy.management.CopyRaster(trimmed_raster_path, input_raster_path)
+            arcpy.management.Delete(trimmed_raster_path)
+            return input_raster_path
+        return trimmed_raster_path
     
     def mask_intersector(masks):
         """

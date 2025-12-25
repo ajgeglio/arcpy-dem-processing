@@ -6,8 +6,8 @@ from utils import Utils
 from arcpyUtils import ArcpyUtils
 from rasterUtils import RasterUtils
 from gdalUtils import GdalUtils
+from inpainter import Inpainter
 from metafunctions import MetaFunctions
-from inpainter import *
 import time
 import warnings
 from rasterio.windows import Window
@@ -47,10 +47,9 @@ class ProcessDem:
         products=None,
         fill_method=None,
         fill_iterations=1,
+        water_elevation=183.6,
         keep_chunks=False,
-        bypass_depth=False,
-        bypass_mosaic=False,
-        water_elevation=183.6
+        bypass_mosaic=False
     ):
         """
         Initialize the HabitatDerivatives class.
@@ -69,9 +68,13 @@ class ProcessDem:
         self.binary_mask = binary_mask if binary_mask else None
         # Ensure raster statistics exist before transformation
         try:
+            # Try to get a property that requires stats
             _ = arcpy.management.GetRasterProperties(self.input_dem, "MINIMUM").getOutput(0)
         except Exception:
-            arcpy.management.CalculateStatistics(self.input_dem)
+            print("Statistics missing or unreadable. Calculating...")
+            # ignore_values="" handles NoData correctly
+            # skip_existing=True ensures we don't recalculate if they actually exist but were just locked
+            arcpy.management.CalculateStatistics(self.input_dem, skip_existing=True)
 
         self.input_bs = input_bs if input_bs else None
 
@@ -80,8 +83,7 @@ class ProcessDem:
                 "Spatial Ref not matching! You can use the function RasterUtils.transform_spatial_reference_arcpy(base_raster, transform_raster)"
             
         # converts to depth if it is in elevation
-        if not bypass_depth:
-            self.input_dem = ArcpyUtils.apply_height_to_depth_transformation(self.input_dem, water_elevation)
+        self.input_dem = ArcpyUtils.apply_height_to_depth_transformation(self.input_dem, water_elevation)
 
         self.dem_name = Utils.sanitize_path_to_name(self.input_dem)
         dem_desc = arcpy.Describe(self.input_dem)
@@ -128,42 +130,63 @@ class ProcessDem:
         self.message_length = 0
 
         # Initialize inpainter and binary mask according to the input parameters
-        if self.input_dem and self.input_bs and self.binary_mask:
-            print("Filling input rasters and using input binary mask to trim boundaries, assumed alignment")
-            aligned_dem = self.input_dem
-            aligned_bs = self.input_bs
-            trimmed_dem_path, inpainter = MetaFunctions.fill_trim_with_intersection_mask(aligned_dem, aligned_bs, self.binary_mask, fill_method, fill_iterations)
+        # but ensure they exist in scope.
+        fill_m = self.fill_method
+        fill_i = self.fill_iterations
 
-        elif self.input_dem and self.input_bs and not self.binary_mask:
-            print("Aligning dem and backscatter and then filling input raster, then generating boundaries and mask, and trimming rasters to binary mask")
-            aligned_bs_path = ArcpyUtils.align_rasters(self.input_dem, self.input_bs)
-            trimmed_dem_path, intersection_mask, inpainter = MetaFunctions.fill_trim_make_intersection_mask(self.input_dem, aligned_bs_path, fill_method, fill_iterations)
-            self.binary_mask = intersection_mask
+        # 1. Handle Backscatter Alignment early (Unified)
+        if self.input_bs and self.input_dem:
+            # Only align if not already handled by a specific complex function later
+            if not self.divisions: 
+                print("Aligning backscatter to DEM...")
+                self.input_bs = ArcpyUtils.align_rasters(self.input_dem, self.input_bs)
 
-        elif self.input_dem and not self.input_bs and not self.binary_mask:
-            if fill_method is not None:
-                trimmed_dem_path, inpainter, self.binary_mask = MetaFunctions.fill_and_return_mask(self.input_dem, fill_method, fill_iterations)
-            if fill_method is None:
-                print("Generating the binary mask from the inpur raster, no filling")
-                trimmed_dem_path = self.input_dem
-                self.binary_mask = ArcpyUtils.create_binary_mask(trimmed_dem_path, data_value=1, nodata_value=0)
-                inpainter = Inpainter(trimmed_dem_path)
+        # 2. Primary Logic Tree
+        if self.input_dem and self.binary_mask:
+            if self.divisions:
+                if fill_m is None:
+                    print("No Fill method: Using input binary mask to trim final products.")
+                else:
+                    print("Filling deferred to tiling. WARNING: Unfilled masks will re-punch holes.")
+            else:
+                # Global Fill + Trim with provided mask
+                print("Filling and trimming using provided intersection mask...")
+                self.input_dem = MetaFunctions.fill_trim_with_intersection_mask(
+                    self.input_dem, self.input_bs, self.binary_mask, fill_m, fill_i
+                )
 
-        elif self.input_dem and not self.input_bs and self.binary_mask:
-            print("Using input raster and binary mask, without filling or trimming")
-            inpainter = Inpainter(self.input_dem)
-            trimmed_dem_path = self.input_dem
+        elif self.input_dem and not self.binary_mask:
+            if self.divisions:
+                if fill_m is None:
+                    print("Tiling enabled: No filling. Generating mask from raw DEM.")
+                    self.binary_mask = ArcpyUtils.create_binary_mask(self.input_dem, data_value=1, nodata_value=0)
+                else:
+                    print("Tiling enabled: Binary mask will be generated from final filled tiles.")
+            else:
+                # No tiling, no mask provided: Generate everything now
+                if self.input_bs:
+                    print("Generating intersection mask and filling globally...")
+                    trimmed_path, mask = MetaFunctions.fill_trim_make_intersection_mask(
+                        self.input_dem, self.input_bs, fill_m, fill_i
+                    )
+                    self.input_dem, self.binary_mask = trimmed_path, mask
+                else:
+                    if fill_m is not None:
+                        print("Filling globally and generating mask...")
+                        self.input_dem, self.binary_mask = MetaFunctions.fill_and_return_mask(
+                            self.input_dem, fill_m, fill_i
+                        )
+                    else:
+                        print("No filling: Generating mask from raw DEM.")
+                        self.binary_mask = ArcpyUtils.create_binary_mask(self.input_dem, data_value=1, nodata_value=0)
 
-        self.input_dem = trimmed_dem_path
-        self.inpainter = inpainter
-        arcpy.env.extent = Raster(self.binary_mask).extent
+        arcpy.env.extent = Raster(self.input_dem).extent
 
         if not self.input_dem:
             raise ValueError("Input DEM is not provided. Please provide a valid DEM path.")
         if not self.products:
             self.products = ["slope", "aspect", "roughness", "tpi", "tri", "hillshade"]
         
-        # --- FIX: Expand Bathymorphons to all sub-products ---
         if self.products:
             # Normalize input keys (handle 'geomorphons' alias if used)
             if "geomorphons" in self.products:
@@ -186,9 +209,9 @@ class ProcessDem:
         # Output file paths
         output_files = {}
         for key in self.products:
-            if key == "shannon_index":
+            if key == "shannon":
                 for win in self.shannon_window:
-                    output_files[f"{key}_{win}"] = os.path.join(self.habitat_derivatives_folder, f"{self.dem_name}_{key}_{win}.tif")
+                    output_files[f"{key}{win}"] = os.path.join(self.habitat_derivatives_folder, f"{self.dem_name}_{key}{win}.tif")
             # Handle Bathymorphons file naming
             elif "bathymorphons" in key:
                 # e.g. bathymorphons_10c -> name_bathymorphons_10c.tif
@@ -220,7 +243,7 @@ class ProcessDem:
         output_lbp_8_1=output_files.get("lbp-8-1")
         output_lbp_15_2=output_files.get("lbp-15-2")
         output_lbp_21_4=output_files.get("lbp-21-4")
-        output_dem=output_files.get("dem")
+        output_filled_dem=output_files.get("filled")
 
         """ Read a DEM and compute slope, aspect, roughness, TPI, and TRI. Output each to TIFF files based on user input. """
         # --- UPDATED GENERATOR: Accepts 'products_to_skip' ---
@@ -252,7 +275,7 @@ class ProcessDem:
                 yield habitat_derivatives.calculate_hillshade(output_hillshade), output_hillshade
             
             for win in self.shannon_window:
-                key = f"shannon_index_{win}"
+                key = f"shannon{win}"
                 if key in output_files and key not in products_to_skip:
                     yield habitat_derivatives.calculate_shannon_index_2d(win), output_files[key]
             
@@ -262,8 +285,8 @@ class ProcessDem:
                 yield habitat_derivatives.calculate_lbp(15, 2), output_lbp_15_2
             if output_lbp_21_4 and "lbp-21-4" not in products_to_skip:
                 yield habitat_derivatives.calculate_lbp(21, 4), output_lbp_21_4
-            if output_dem and "dem" not in products_to_skip:
-                yield habitat_derivatives.return_dem_data(), output_dem
+            if output_filled_dem and "filled" not in products_to_skip:
+                yield habitat_derivatives.return_dem_data(), output_filled_dem
             
             # --- NEW: Landforms / Bathymorphons ---
             # Check which landforms are needed and not skipped
@@ -374,7 +397,7 @@ class ProcessDem:
                     
                     # Trim the shannon index to avoid specific window artifacts (Halo effect)
                     if "shannon" in str(output_file).lower():
-                        self.inpainter.trim_raster(output_file, self.binary_mask, overwrite=True)
+                        ArcpyUtils.trim_raster(output_file, self.binary_mask, overwrite=True)
 
 
         # If we are chunking, we need to process each chunk and then merge them
@@ -416,9 +439,8 @@ class ProcessDem:
                         tile_counter += 1
                         
                         # --- OPTIMIZATION 1: Identify Skippable Products ---
-                        products_to_skip = []
-                        all_products_exist = True
-                        
+                        chunks_to_skip = []
+
                         for prod_key, prod_master_path in output_files.items():
                             prod_dir = os.path.dirname(prod_master_path)
                             prod_name = os.path.basename(prod_master_path).split(".")[0]
@@ -426,14 +448,14 @@ class ProcessDem:
                             chunk_path = os.path.join(chunk_folder, f"{prod_name}_chunk_{i}_{j}.tif")
                             
                             if os.path.exists(chunk_path):
-                                products_to_skip.append(prod_key)
-                            else:
-                                all_products_exist = False
+                                chunks_to_skip.append(prod_key)
                         
-                        if all_products_exist:
+                        # --- BUG FIX START: Only continue if ALL products exist ---
+                        if len(chunks_to_skip) == len(output_files):
                             message = f"Skipping Tile {tile_counter}/{total_tiles} (All products exist)"
                             self.message_length = Utils.print_progress(message, self.message_length)
                             continue
+                        # --- BUG FIX END ---
                         # -----------------------------------------------------
 
                         # A. Define Write Window
@@ -452,6 +474,7 @@ class ProcessDem:
                         pad_top = i - read_row_start
                         pad_left = j - read_col_start
                         
+                        # C. Read and Save the Buffered Chunk
                         chunk_dem_path = os.path.join(dem_chunk_temp_folder, f"{self.dem_name}_chunk_{i}_{j}.tif")
                         
                         # Optimization 2: Reuse temp chunk if available
@@ -470,30 +493,77 @@ class ProcessDem:
                             chunk_data_padded = src.read(1, window=read_window)
                             chunk_transform_padded = src.window_transform(read_window)
                             
+                            # --- 1. SANITIZE BEFORE WRITING (Critical Fix) ---
+                            # This prevents "Dirty" data (3.4e38) from ever touching the disk.
                             if np.issubdtype(chunk_data_padded.dtype, np.floating):
                                 with np.errstate(invalid='ignore'):
-                                    mask = chunk_data_padded < -15000.0
+                                    # Catch huge positive/negative artifacts
+                                    mask = np.abs(chunk_data_padded) > 100000.0
                                     if np.any(mask):
-                                        chunk_data_padded[mask] = np.nan
+                                        chunk_data_padded[mask] = src.nodata if src.nodata is not None else np.nan
+                            # ------------------------------------------------
 
                             with rasterio.open(
                                 chunk_dem_path, 'w', driver='GTiff', compress='lzw',
                                 height=chunk_data_padded.shape[0], width=chunk_data_padded.shape[1],
                                 count=1, dtype=str(chunk_data_padded.dtype),
-                                crs=original_dem_crs, transform=chunk_transform_padded
+                                crs=original_dem_crs, transform=chunk_transform_padded,
+                                nodata=src.nodata 
                             ) as dst:
                                 dst.write(chunk_data_padded, 1)
 
-                        message = f"Processing tile {tile_counter}/{total_tiles} (Skipping: {len(products_to_skip)})"
-                        self.message_length = Utils.print_progress(message, self.message_length)
+                        # --- Apply Tiled Filling ---
+                        if self.divisions and self.fill_method is not None:
+                            # Note: We check for NaNs OR the NoData value
+                            should_fill = False
+                            if np.isnan(chunk_data_padded).any():
+                                should_fill = True
+                            elif src.nodata is not None and (chunk_data_padded == src.nodata).any():
+                                should_fill = True
 
+                            if should_fill:
+                                # --- BRANCH LOGIC ---
+                                if self.fill_method == "IDW":
+                                    chunk_dem_path = Inpainter.fill_chunk_idw(
+                                        chunk_dem_path, 
+                                        iterations=self.fill_iterations,
+                                        power=2.0,
+                                        search_radius=5.0 # Adjust search radius as needed
+                                    )
+                                elif self.fill_method == "FocalStatistics":
+                                    chunk_dem_path = Inpainter.fill_chunk_focal_stats(
+                                        chunk_dem_path, 
+                                        iterations=self.fill_iterations,
+                                        kernel_size=9
+                                    )
+                                # Reload data (Only once!)
+                                with rasterio.open(chunk_dem_path) as src_filled:
+                                    chunk_data_padded = src_filled.read(1)
+                                    
+                                # --- 2. POST-FILL SANITIZATION (Safety Net) ---
+                                # If the Inpainter created new artifacts, we clean them 
+                                # AND update the file so ArcPy doesn't choke.
+                                if np.issubdtype(chunk_data_padded.dtype, np.floating):
+                                    with np.errstate(invalid='ignore'):
+                                        mask = np.abs(chunk_data_padded) > 100000.0
+                                        if np.any(mask):
+                                            message = f"Sanitized artifacts in tile {tile_counter}"
+                                            self.message_length = Utils.print_progress(message, self.message_length)
+                                            chunk_data_padded[mask] = np.nan
+                                            
+                                            # UPDATE THE FILE ON DISK
+                                            with rasterio.open(chunk_dem_path, 'r+') as dst:
+                                                dst.write(chunk_data_padded, 1)
+                                    
+                        message = f"Processing tile {tile_counter}/{total_tiles} (Skipping: {len(chunks_to_skip)})"
+                        self.message_length = Utils.print_progress(message, self.message_length)
                         # D. Generate Products (Pass Skip List)
-                        for data, output_file in generate_products(chunk_dem_path, chunk_data_padded, chunk_transform_padded, verbose=False, products_to_skip=products_to_skip):
+                        for data, output_file in generate_products(chunk_dem_path, chunk_data_padded, chunk_transform_padded, verbose=False, products_to_skip=chunks_to_skip):
                             output_dir = os.path.dirname(output_file)
                             product_name = os.path.basename(output_file).split(".")[0]
                             product_folder = os.path.join(output_dir, product_name)
                             os.makedirs(product_folder, exist_ok=True)
-                            chunk_output_file = os.path.join(product_folder, f"{product_name}_chunk_{i}_chunk_{j}.tif")
+                            chunk_output_file = os.path.join(product_folder, f"{product_name}_chunk_{i}_{j}.tif")
 
                             if data is None:
                                 if arcpy.Exists(output_file):
@@ -532,26 +602,78 @@ class ProcessDem:
                                 except Exception: pass
                             else:
                                 print(f"Warning: Output chunk was not created for tile {i},{j}.")
-                            
+
                 # --- 4. Merge and Clean ---
                 print() # Finalize progress bar
 
-                for product_key, output_file in output_files.items(): 
+                # ==========================================================
+                # FIX 1: RESET EXTENT BEFORE MERGE
+                # ==========================================================
+                # This prevents the merge from being clipped to the last tile's corner
+                arcpy.env.extent = self.original_snap_raster 
+                arcpy.env.snapRaster = self.original_snap_raster
+                # ==========================================================
+
+                # ==========================================================
+                # FIX 2: CREATE PRIORITY QUEUE
+                # ==========================================================
+                # Convert dictionary items to a list so we can sort them.
+                merge_queue = list(output_files.items())
+                
+                # Sort logic: 
+                # If product name is 'filled', give it index 0 (First).
+                # All other products get index 1 (Second).
+                merge_queue.sort(key=lambda x: 0 if x[0] == 'filled' else 1)
+
+                for product_key, output_file in merge_queue: 
                     # Determine the folder where chunks are stored
                     dem_chunks_path = os.path.join(os.path.dirname(output_file), os.path.basename(output_file).split(".")[0])
                     
                     if os.path.exists(dem_chunks_path) and not self.bypass_mosaic: 
-                        # STEP A: Merge, but DO NOT let the utility delete chunks yet (prevents the crash)
+                        # STEP A: Merge
+                        print(f"Merging chunks for {product_key}...")
                         merged_dem = ArcpyUtils.merge_dem_arcpy(dem_chunks_path, remove_chunks=False)
                         
-                        # STEP B: Post-process the merged result
-                        trimmed_raster_path = self.inpainter.trim_raster(merged_dem, self.binary_mask, overwrite=True)
-                        ArcpyUtils.compress_raster(trimmed_raster_path, format="TIFF", overwrite=True)
+                        # STEP B: Update Mask (If this is the filled DEM)
+                        if product_key == 'filled':
+                            print("Generating authoritative binary mask from Filled DEM...")
+                            # This updates self.binary_mask so subsequent loops (Slope, Aspect) use the correct one
+                            self.binary_mask = ArcpyUtils.create_binary_mask(merged_dem, data_value=1, nodata_value=0)
+                            if self.fill_method in ["FocalStatistics", "IDW"]:
+                                shrink_cells = 0
+                                
+                                if self.fill_method == "FocalStatistics":
+                                    # Kernel was 9, so radius is 4
+                                    shrink_cells = 4 * self.fill_iterations
+                                    
+                                elif self.fill_method == "IDW":
+                                    # Search radius was set to 5.0 in the tiling loop
+                                    # If you changed the search_radius in the loop, update this number!
+                                    idw_radius = 5 
+                                    shrink_cells = idw_radius * self.fill_iterations
+                                
+                                if shrink_cells > 0:
+                                    print(f"Removing {self.fill_method} halo (Shrinking by {shrink_cells} cells)...")
+                                    # Apply Shrink (Erosion)
+                                    shrunk_mask = Shrink(self.binary_mask, shrink_cells, [1])
+                                    # Overwrite the mask file
+                                    shrunk_mask.save(self.binary_mask)
+                                    # Clean up
+                                    del shrunk_mask
+
+                        # STEP C: Post-process (Trim)
+                        # We trim ALL products (including 'filled' itself to clean edges) using the new mask
+                        if self.binary_mask:
+                            print(f"Trimming {product_key} to binary mask...")
+                            trimmed_raster_path = ArcpyUtils.trim_raster(merged_dem, self.binary_mask, overwrite=True)
+                        else:
+                            trimmed_raster_path = merged_dem
+
+                        # STEP D: Compress
+                        ArcpyUtils.compress_raster(trimmed_raster_path, format="TIFF", overwrite=False)
                         
-                        # STEP C: Explicitly release references
+                        # STEP E: Cleanup
                         del merged_dem 
-                        
-                        # STEP D: Robust cleanup
                         ArcpyUtils.cleanup_chunks(dem_chunks_path)
                         Utils.remove_additional_files(directory=os.path.dirname(dem_chunks_path))
                     else:
@@ -570,24 +692,3 @@ class ProcessDem:
         # Clean up additional files after processing
         Utils.remove_additional_files(directory=os.path.dirname(input_dem))
 
-# example usage
-if __name__ == "__main__":
-    start_time = time.time()
-
-    out_folder = "habitat_derivatives"
-    input_dem = "dem\\dem.tif"  # Path to the input DEM file
-    products = ["slope"] # Specify the products to generate, e.g., ["slope", "aspect", "roughness", "tpi", "tri", "hillshade", "shannon_index", "lbp-3-1"]
-    # Create an instance of the HabitatDerivatives class with the specified parameters
-    habitat_derivatives = ProcessDem(
-                                    input_dem=input_dem, 
-                                    output_folder=out_folder,
-                                    products=products,
-                                    shannon_window=21,
-                                    fill_iterations=1,
-                                    fill_method=None,  # "IDW" or "FocalStatistics" or None
-                                    divisions=8,  # Set to None for no chunking, or specify a chunk size
-                                    )
-    habitat_derivatives.process_dem()
-
-    # Print time lapsed
-    time_convert(time.time() - start_time)

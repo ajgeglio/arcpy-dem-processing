@@ -3,54 +3,42 @@ import os, tempfile
 from utils import Utils
 import arcpy
 from arcpy.sa import *
+import uuid
+from arcpy.sa import FocalStatistics, Con, IsNull, Raster, NbrRectangle, Abs, SetNull, Idw, RadiusFixed
+import shutil
 
 class Inpainter:
     def __init__(self, input_raster, save_path=None):
-        """Initialize the inpainter with the input raster path and optional save path."""
-        self.temp_workspace = tempfile.mkdtemp()  # Use a temporary folder for intermediate outputs
-        self.temp_files = []  # Track temporary files
+        self.temp_files = []
 
-        # --- 0. License Check ---
         if arcpy.CheckExtension("Spatial") == "Available":
             arcpy.CheckOutExtension("Spatial")
-            arcpy.AddMessage("Spatial Analyst extension checked out.")
         else:
-            arcpy.AddError("Spatial Analyst extension is not available. Cannot proceed.")
             raise arcpy.ExecuteError("Spatial Analyst license is unavailable.")
 
-        # Store original spatial reference, cell size, and snap raster for assertion
         self.input_raster = input_raster
         self.dem_name = Utils.sanitize_path_to_name(self.input_raster)
-        dem_desc = arcpy.Describe(self.input_raster)
-        self.original_spatial_ref = dem_desc.spatialReference
-        self.original_cell_size = arcpy.management.GetRasterProperties(self.input_raster, "CELLSIZEX").getOutput(0)
-        self.original_snap_raster = self.input_raster
-
-        # Set arcpy.env variables to match input raster
-        arcpy.env.outputCoordinateSystem = self.original_spatial_ref
-        arcpy.env.snapRaster = self.original_snap_raster
-        arcpy.env.cellSize = self.original_cell_size
-
-        # --- 1. Validate Inputs ---
+        
         if not arcpy.Exists(self.input_raster):
-            arcpy.AddError(f"Input raster '{self.input_raster}' does not exist.")
             raise FileNotFoundError(f"Input raster '{self.input_raster}' does not exist.")
         
-        # create the save path if it doesn't exist
+        # Path Setup
         self.filled_path = os.path.join(os.path.dirname(self.input_raster))
+        
         if save_path is None:
             self.save_path = os.path.join(os.path.dirname(self.input_raster), "boundary_files")
         else:
             self.save_path = save_path
-        self.local_temp = os.path.join(self.save_path, self.dem_name+"_local_temp")
+            
+        # Unique Temp Folder
+        unique_id = uuid.uuid4().hex[:6]
+        self.local_temp = os.path.join(self.save_path, f"{self.dem_name}_temp_{unique_id}")
+        self.temp_workspace = self.local_temp
         
         os.makedirs(self.local_temp, exist_ok=True)
         os.makedirs(self.save_path, exist_ok=True)
-        # os.makedirs(self.filled_path, exist_ok=True)
-
-        # --- FIX: Create a Temp FileGDB for massive intermediate data ---
-        # Shapefiles have a 2GB limit, and "in_memory" crashes RAM.
-        # FileGDB is the only safe place for this scale of data.
+        
+        # Temp FileGDB
         self.temp_gdb = os.path.join(self.local_temp, "intermediate_calc.gdb")
         if not arcpy.Exists(self.temp_gdb):
             try:
@@ -58,393 +46,435 @@ class Inpainter:
             except Exception as e:
                 print(f"Warning: Could not create temp GDB: {e}")
 
+        arcpy.env.workspace = self.temp_gdb 
+        arcpy.env.scratchWorkspace = self.local_temp 
+        
         self.message_length = 0
         self.last_fill_iterations = None
-        arcpy.env.workspace = self.local_temp
-        arcpy.env.scratchWorkspace = self.temp_workspace
 
+        # Set workspace to the NEW unique folder
+        arcpy.env.workspace = self.temp_gdb 
+        arcpy.env.scratchWorkspace = self.local_temp
 
-    def impute_dem_gaps_idw(self, input_raster, input_mask, idw_power=2.0, search_radius_fixed_units=5.0, iterations=1):
-        """
-        Fills gaps in a Digital Elevation Model (DEM) using Inverse Distance Weighted (IDW)
-        interpolation based on valid DEM cell values converted to points. Repeats the process
-        for a specified number of iterations to fill additional gaps.
-
-        Returns:
-            Interpolated raster object or False if an error occurs.
-        """
-        # Store original environment settings to restore them later
+    def impute_gaps_idw(self, idw_power=2.0, search_radius_fixed_units=5.0, iterations=1):
         original_settings = {
             "overwriteOutput": arcpy.env.overwriteOutput,
-            "outputCoordinateSystem": arcpy.env.outputCoordinateSystem,
-            "cellSize": arcpy.env.cellSize,
-            "snapRaster": arcpy.env.snapRaster,
-            "mask": arcpy.env.mask,
             "extent": arcpy.env.extent,
-            "workspace": arcpy.env.workspace,
-            "scratchWorkspace": arcpy.env.scratchWorkspace
+            "mask": arcpy.env.mask,
+            "cellSize": arcpy.env.cellSize  # Backup cell size too
         }
-        if not arcpy.Exists(input_mask):
-            arcpy.AddError(f"Input mask polygon '{input_mask}' does not exist.")
-            quit()
-        
-        current_raster = input_raster
-        temp_points_fc = None # Initialize for the finally block
+        current_raster = self.input_raster
+        temp_points_fc = None
 
         try:
             arcpy.AddMessage(f"Starting DEM gap filling using IDW for {iterations} iteration(s)...")
-           
-            # --- 2. Set Environment Settings ---
-            dem_desc = arcpy.Describe(input_raster)
-            dem_spatial_ref = dem_desc.spatialReference
+            dem_desc = arcpy.Describe(self.input_raster)
             
-            # Get cell size (use CELLSIZEX, assuming square cells, common for DEMs)
-            cell_size_x_result = arcpy.management.GetRasterProperties(input_raster, "CELLSIZEX")
-            dem_cell_size = float(cell_size_x_result.getOutput(0))
-            
-            arcpy.env.outputCoordinateSystem = dem_spatial_ref
-            arcpy.env.cellSize = dem_cell_size
-            arcpy.env.snapRaster = input_raster
-            arcpy.env.mask = input_mask
+            # Ensure environment matches input EXACTLY
             arcpy.env.extent = dem_desc.extent
-            arcpy.env.workspace = self.local_temp
-            arcpy.env.scratchWorkspace = self.temp_workspace
             arcpy.env.overwriteOutput = True
+            arcpy.env.cellSize = dem_desc.meanCellHeight # Force cell size in env
+            
+            # Create Radius Object outside the function call for safety
+            # Cast to float to ensure no type confusion
+            radius_obj = arcpy.sa.RadiusFixed(float(search_radius_fixed_units))
 
             for i in range(iterations):
                 arcpy.AddMessage(f"IDW iteration {i+1} of {iterations}...")
-
-                # --- FIX: Write points to Temp GDB instead of in_memory ---
+                
                 temp_point_name = f"dem_idw_pts_{i}"
                 if arcpy.Exists(self.temp_gdb):
                     temp_points_fc = os.path.join(self.temp_gdb, temp_point_name)
                 else:
-                    # Fallback to temp folder (will be shapefile, might hit 2GB limit)
                     temp_points_fc = os.path.join(self.local_temp, f"{temp_point_name}.shp")
 
                 if arcpy.Exists(temp_points_fc):
                     arcpy.management.Delete(temp_points_fc)
 
-                # Only use valid cells
+                # OPTIMIZATION: Removed redundant SetNull. 
+                # RasterToPoint automatically ignores NoData values.
                 arcpy.conversion.RasterToPoint(
-                    in_raster=arcpy.sa.SetNull(current_raster, current_raster, "VALUE IS NULL"),
+                    in_raster=current_raster,
                     out_point_features=temp_points_fc,
                     raster_field="VALUE"
                 )
 
-                point_count = int(arcpy.management.GetCount(temp_points_fc).getOutput(0))
-                if point_count == 0:
+                if int(arcpy.management.GetCount(temp_points_fc).getOutput(0)) == 0:
                     arcpy.AddError("No valid data points generated. Cannot run IDW.")
                     return None
                 
-                arcpy.AddMessage(f"{point_count} points generated. Running IDW...")
-
-                # Run IDW interpolation
-                idw_search_radius_obj = arcpy.sa.RadiusFixed(search_radius_fixed_units)
+                # FIX: Use Keyword Arguments to ensure correct mapping
                 idw_interpolated_raster = arcpy.sa.Idw(
                     in_point_features=temp_points_fc,
                     z_field="grid_code",
-                    power=idw_power,
-                    search_radius=idw_search_radius_obj
+                    cell_size=self.input_raster, # Explicitly pass cell size
+                    power=float(idw_power),
+                    search_radius=radius_obj
                 )
 
-                # Combine original raster and IDW result: fill only NoData cells
+                # Fill gaps: If current is Null, use IDW. Else use current.
                 current_raster = arcpy.sa.Con(
                     arcpy.sa.IsNull(current_raster),
                     idw_interpolated_raster,
                     current_raster
                 )
 
-                # Clean up temp points
                 if temp_points_fc and arcpy.Exists(temp_points_fc):
-                    try:
-                        arcpy.management.Delete(temp_points_fc)
-                    except Exception:
-                        pass
+                    try: arcpy.management.Delete(temp_points_fc)
+                    except: pass
 
-            arcpy.AddMessage("IDW interpolation complete.")
             return current_raster
 
-        except arcpy.ExecuteError:
-            arcpy.AddError(f"ArcPy ExecuteError: {arcpy.GetMessages(2)}")
-            arcpy.AddMessage(traceback.format_exc())
-            return False
         except Exception as e:
-            arcpy.AddError(f"An unexpected Python error occurred: {str(e)}")
-            arcpy.AddError(traceback.format_exc())
-            return False
+            # Print full traceback to help debug underlying IDW crashes
+            import traceback
+            traceback.print_exc()
+            arcpy.AddError(f"IDW Error: {str(e)}")
+            return None
         finally:
-            # Reset environment settings to their original state
-            arcpy.env.overwriteOutput = original_settings["overwriteOutput"]
-            arcpy.env.outputCoordinateSystem = original_settings["outputCoordinateSystem"]
-            arcpy.env.cellSize = original_settings["cellSize"]
-            arcpy.env.snapRaster = original_settings["snapRaster"]
-            arcpy.env.mask = original_settings["mask"]
+            # Restore all settings
             arcpy.env.extent = original_settings["extent"]
-            arcpy.env.workspace = original_settings["workspace"]
-            arcpy.env.scratchWorkspace = original_settings["scratchWorkspace"]
-            arcpy.AddMessage("Process finished.")
+            arcpy.env.mask = original_settings["mask"]
+            arcpy.env.overwriteOutput = original_settings["overwriteOutput"]
+            arcpy.env.cellSize = original_settings["cellSize"]
 
-    def impute_gaps_focal_statistics(self, input_tif, iterations, snap_raster=None):
-        desc = arcpy.Describe(input_tif)
-        converted_input = os.path.join(self.temp_workspace, f"{self.dem_name}_converted.tif")
-        print(f"Input raster properties: Format={desc.format}, SpatialReference={desc.spatialReference.name}")
-
-        # Store original environment settings to restore them later
-        original_settings = {
-            "snapRaster": arcpy.env.snapRaster,
-            "cellSize": arcpy.env.cellSize,
-            "outputCoordinateSystem": arcpy.env.outputCoordinateSystem,
-            "extent": arcpy.env.extent,
-            "workspace": arcpy.env.workspace,
-            "scratchWorkspace": arcpy.env.scratchWorkspace,
-            "overwriteOutput": arcpy.env.overwriteOutput
-        }
-
+    def impute_gaps_focal_statistics(self, iterations, snap_raster=None, kernel_size=9):
+        """
+        Fills gaps using FocalStatistics.
+        kernel_size=9 is roughly equivalent to 4 iterations of a 3x3 kernel but faster.
+        """
+        desc = arcpy.Describe(self.input_raster)
+        converted_input = os.path.join(self.temp_gdb, "focal_convert_temp")
+        
         try:
-            # Set environment to match input raster
-            arcpy.env.snapRaster = snap_raster if snap_raster else input_tif
-            arcpy.env.cellSize = input_tif
+            arcpy.env.snapRaster = snap_raster if snap_raster else self.input_raster
+            arcpy.env.cellSize = self.input_raster
             arcpy.env.outputCoordinateSystem = desc.spatialReference
             arcpy.env.extent = desc.extent
-            arcpy.env.workspace = self.local_temp
-            arcpy.env.scratchWorkspace = self.temp_workspace
             arcpy.env.overwriteOutput = True
-
-            message = "Converting input raster to supported format..."
-            self.message_length = Utils.print_progress(message, self.message_length)
-            arcpy.CopyRaster_management(input_tif, converted_input, format="TIFF")
-            print(f"Converted raster saved to: {converted_input}")
-            message = "Attempting filling NoData values..."
-            self.message_length = Utils.print_progress(message, self.message_length)
+            
+            # Copy to GDB raster
+            arcpy.management.CopyRaster(self.input_raster, converted_input)
+            
             fc_filled_raster = Raster(converted_input)
 
             for iteration in range(iterations):
-                message = f"Pass {iteration + 1} of filling with neighborhood focal statistics..."
+                message = f"Pass {iteration + 1} of filling with Focal Stats (Size {kernel_size})..."
                 self.message_length = Utils.print_progress(message, self.message_length)
-                neighborhood = NbrRectangle(3, 3, "CELL")
-                fc_filled_raster = FocalStatistics(fc_filled_raster, neighborhood, "MEAN", "DATA")
+                
+                # FIX: Use the larger kernel size here
+                neighborhood = NbrRectangle(kernel_size, kernel_size, "CELL")
+                
+                focal_mean = FocalStatistics(fc_filled_raster, neighborhood, "MEAN", "DATA")
+                
+                # Include the sanitization fix we discussed earlier
+                clean_focal = SetNull(Abs(focal_mean) > 100000, focal_mean)
+                
+                fc_filled_raster = Con(IsNull(fc_filled_raster), clean_focal, fc_filled_raster)
+                
             return fc_filled_raster
 
-        finally:
-            # Restore environment settings
-            arcpy.env.snapRaster = original_settings["snapRaster"]
-            arcpy.env.cellSize = original_settings["cellSize"]
-            arcpy.env.outputCoordinateSystem = original_settings["outputCoordinateSystem"]
-            arcpy.env.extent = original_settings["extent"]
-            arcpy.env.workspace = original_settings["workspace"]
-            arcpy.env.scratchWorkspace = original_settings["scratchWorkspace"]
-            arcpy.env.overwriteOutput = original_settings["overwriteOutput"]
+        except Exception as e:
+            print(f"Error in Focal Statistics: {e}")
+            raise
 
-    def fill_internal_gaps_arcpy(self, input_mask, method="IDW", iterations=1, idw_power=2.0, search_radius=5.0):
-        """Fill internal gaps in the DEM using smoothing and filling."""
+    def fill_internal_gaps_arcpy(self, method="IDW", iterations=1, idw_power=2.0, search_radius=5.0, dissolved_polygon=None, overwrite=True):
         self.last_fill_iterations = iterations
         
-        # Create filled folder lazy
         if not os.path.exists(self.filled_path):
             os.makedirs(self.filled_path, exist_ok=True)
 
+        original_settings = {
+            "mask": arcpy.env.mask,
+            "workspace": arcpy.env.workspace,
+            "overwrite": arcpy.env.overwriteOutput
+        }
+
         try:
-            # Environment setup
+            # --- Environment Setup ---
             dem_desc = arcpy.Describe(self.input_raster)
             arcpy.env.outputCoordinateSystem = dem_desc.spatialReference
             arcpy.env.snapRaster = self.input_raster
             arcpy.env.cellSize = self.input_raster
             arcpy.env.overwriteOutput = True
-            arcpy.env.workspace = self.local_temp
-            arcpy.env.scratchWorkspace = self.temp_workspace
+            arcpy.env.workspace = self.temp_gdb
             arcpy.env.extent = dem_desc.extent
-            arcpy.env.mask = input_mask if method == "IDW" else None
             
-            input_tif = self.input_raster
-            filled_raster_path = os.path.join(self.filled_path, f"{self.dem_name}_filled.tif")
-            
-            self.message_length = Utils.print_progress("Verifying input raster...", self.message_length)
-            
+            # IDW needs a mask to constrain interpolation; FocalStats needs None to "grow" into gaps
+            arcpy.env.mask = dissolved_polygon if method == "IDW" else None
+
+            # --- Path Logic & Backup ---
+            if overwrite:
+                backup_path = os.path.join(self.filled_path, f"{self.dem_name}_original.tif")
+                if not arcpy.Exists(backup_path):
+                    arcpy.AddMessage(f"Creating backup of original at: {backup_path}")
+                    arcpy.Copy_management(self.input_raster, backup_path)
+                
+                final_target_path = self.input_raster
+                # Save to GDB first to avoid file lock issues during processing
+                temp_output = os.path.join(self.temp_gdb, "filled_raster_temp")
+            else:
+                final_target_path = os.path.join(self.filled_path, f"{self.dem_name}_filled.tif")
+                temp_output = final_target_path
+
+            # --- Processing ---
             filled_raster = None
             if method == "FocalStatistics":
-                filled_raster = self.impute_gaps_focal_statistics(input_tif, iterations=iterations)
-                # --- FIX: Clip the expansion back to the boundary ---
-                # Since IDW works with this mask, we know the mask covers the valid area + internal holes, so trimming to it is safe.
-                if input_mask and arcpy.Exists(input_mask):
-                    arcpy.AddMessage("Clipping Focal Statistics expansion to boundary mask...")
-                    filled_raster = arcpy.sa.ExtractByMask(filled_raster, input_mask)
-            elif method == "IDW":
-                filled_raster = self.impute_dem_gaps_idw(input_tif, input_mask, idw_power, search_radius, iterations)
-            
-            # --- FIX: Check for failure before saving ---
-            if filled_raster is None:
-                raise RuntimeError(f"Gap filling failed using method: {method}. Check logs/memory.")
+                filled_raster = self.impute_gaps_focal_statistics(iterations=iterations)
                 
-            filled_raster.save(filled_raster_path)
-            arcpy.AddMessage(f"Saved filled DEM to: '{filled_raster_path}'")
+                # Clip expansion back to the study area if a polygon is provided
+                if dissolved_polygon and arcpy.Exists(dissolved_polygon):
+                    arcpy.AddMessage("Clipping Focal Statistics expansion to boundary...")
+                    filled_raster = arcpy.sa.ExtractByMask(filled_raster, dissolved_polygon)
+                    
+            elif method == "IDW":
+                filled_raster = self.impute_gaps_idw(idw_power, search_radius, iterations)
+            
+            if filled_raster is None:
+                raise RuntimeError(f"Gap filling failed: {method}")
 
-            return filled_raster_path
+            # --- Save and Replace Logic ---
+            arcpy.AddMessage(f"Saving temporary result to workspace...")
+            filled_raster.save(temp_output)
+            
+            # If overwriting, we must delete the active pointer to the raster object 
+            # to release the file lock on 'self.input_raster'
+            if overwrite:
+                del filled_raster 
+                arcpy.AddMessage(f"Overwriting original DEM: {final_target_path}")
+                arcpy.CopyRaster_management(temp_output, final_target_path)
+                # Cleanup temp GDB item
+                arcpy.Delete_management(temp_output)
+            
+            arcpy.AddMessage("Gap fill complete.")
+            return final_target_path
 
         except Exception as e:
-            print(f"Fill Error: {e}")
-            raise # Raise to stop execution if fill is critical
+            arcpy.AddError(f"Fill Error: {e}")
+            raise 
+        finally:
+            # Restore original environment
+            arcpy.env.mask = original_settings["mask"]
+            arcpy.env.workspace = original_settings["workspace"]
+            arcpy.env.overwriteOutput = original_settings["overwrite"]
+
+    @staticmethod
+    def fill_chunk_focal_stats(chunk_path, iterations=1, kernel_size=9): # <--- Added kernel_size=9 default
+        """Static method for tiled filling with adjustable kernel."""
+        import arcpy
+        from arcpy.sa import FocalStatistics, Con, IsNull, Raster, NbrRectangle, Abs, SetNull
         
-    def create_binary_mask(self, input_raster, boundary_shapefile):
-        """Create a binary mask using the input raster extents and a boundary shapefile."""
+        try:
+            filled_path = chunk_path.replace(".tif", "_filled.tif")
+            arcpy.env.overwriteOutput = True
+            arcpy.env.snapRaster = chunk_path
+            arcpy.env.cellSize = chunk_path
+            arcpy.env.extent = chunk_path
+            
+            current_raster = Raster(chunk_path)
+            
+            for i in range(iterations):
+                # FIX: Use the kernel_size argument
+                neighborhood = NbrRectangle(kernel_size, kernel_size, "CELL")
+                focal_mean = FocalStatistics(current_raster, neighborhood, "MEAN", "DATA")
+                
+                # Sanitize artifacts
+                clean_focal = SetNull(Abs(focal_mean) > 100000, focal_mean)
+                
+                current_raster = Con(IsNull(current_raster), clean_focal, current_raster)
+            
+            # Final Clean
+            final_clean = SetNull(Abs(current_raster) > 100000, current_raster)
+            
+            final_clean.save(filled_path)
+            del current_raster, final_clean, focal_mean, clean_focal
+            
+            if arcpy.Exists(filled_path):
+                arcpy.ClearWorkspaceCache_management()
+                try:
+                    arcpy.management.Delete(chunk_path)
+                    arcpy.management.Rename(filled_path, chunk_path)
+                    return chunk_path
+                except:
+                    return filled_path
+            return chunk_path
+        except Exception as e:
+            print(f"Error filling chunk: {e}")
+            return chunk_path
+        
+    @staticmethod
+    def fill_chunk_idw(chunk_path, iterations=1, power=2.0, search_radius=5.0):
+        """
+        Static method for tiled filling using IDW. 
+        Uses a temporary File Geodatabase to avoid Shapefile 2GB limits.
+        """
+        
+        # Setup paths
+        chunk_dir = os.path.dirname(chunk_path)
+        unique_id = uuid.uuid4().hex[:6]
+        
+        # FIX: Create a temp GDB for this chunk to avoid Shapefile size limits
+        temp_gdb_name = f"temp_idw_{unique_id}.gdb"
+        temp_gdb_path = os.path.join(chunk_dir, temp_gdb_name)
+        
+        # Temp Feature Class inside the GDB
+        temp_points = os.path.join(temp_gdb_path, "temp_pts")
+        filled_path = chunk_path.replace(".tif", "_filled.tif")
+
+        try:
+            # Create the temp GDB
+            if not arcpy.Exists(temp_gdb_path):
+                arcpy.management.CreateFileGDB(chunk_dir, temp_gdb_name)
+                
+            arcpy.env.overwriteOutput = True
+            arcpy.env.snapRaster = chunk_path
+            arcpy.env.cellSize = chunk_path
+            arcpy.env.extent = chunk_path
+            
+            current_raster = Raster(chunk_path)
+            radius_obj = RadiusFixed(float(search_radius))
+
+            for i in range(iterations):
+                # 1. Convert Valid Data to Points (Stores in GDB now)
+                arcpy.conversion.RasterToPoint(
+                    in_raster=current_raster,
+                    out_point_features=temp_points,
+                    raster_field="VALUE"
+                )
+                
+                if int(arcpy.management.GetCount(temp_points).getOutput(0)) == 0:
+                    break
+
+                # 2. Run IDW
+                idw_raster = Idw(
+                    in_point_features=temp_points,
+                    z_field="grid_code",
+                    cell_size=chunk_path,
+                    power=float(power),
+                    search_radius=radius_obj
+                )
+                
+                # 3. Sanitize and Fill
+                clean_idw = SetNull(Abs(idw_raster) > 100000, idw_raster)
+                current_raster = Con(IsNull(current_raster), clean_idw, current_raster)
+                
+                # Cleanup points inside GDB for next iteration
+                if arcpy.Exists(temp_points):
+                    arcpy.management.Delete(temp_points)
+
+            # Final Save
+            final_clean = SetNull(Abs(current_raster) > 100000, current_raster)
+            final_clean.save(filled_path)
+            
+            # Explicit Memory Cleanup
+            del current_raster, final_clean, clean_idw, idw_raster, radius_obj
+            
+            if arcpy.Exists(filled_path):
+                arcpy.ClearWorkspaceCache_management()
+                try:
+                    arcpy.management.Delete(chunk_path)
+                    arcpy.management.Rename(filled_path, chunk_path)
+                    return chunk_path
+                except:
+                    return filled_path
+            return chunk_path
+
+        except Exception as e:
+            print(f"Error filling chunk with IDW: {e}")
+            return chunk_path
+        finally:
+            # CLEANUP: Delete the entire temp GDB folder
+            if os.path.exists(temp_gdb_path):
+                try:
+                    shutil.rmtree(temp_gdb_path)
+                except:
+                    pass
+    
+    def create_binary_mask_from_boundary(self, boundary_shapefile):
+        """
+        Create binary mask. 
+        Uses CreateConstantRaster + ExtractByMask (Spatial Analyst) which is often 
+        more stable on massive datasets than FeatureToRaster (Conversion).
+        """
         message = "Creating binary mask..."
         self.message_length = Utils.print_progress(message, self.message_length)
-        boundary_raster = os.path.join(self.local_temp, "boundary.tif")
+        
         binary_mask = os.path.join(self.save_path, f"{self.dem_name}_binary_mask.tif")
+        
         if os.path.exists(binary_mask):
             arcpy.Delete_management(binary_mask)
-        # Store original environment settings to restore them later
-        # --- CHANGED: Use input_raster properties for extent, snapRaster, cellSize ---
-        desc = arcpy.Describe(input_raster)
-        cell_size = arcpy.management.GetRasterProperties(input_raster, "CELLSIZEX").getOutput(0)
-        original_settings = {
-            "overwriteOutput": arcpy.env.overwriteOutput,
-            "extent": desc.extent,
-            "snapRaster": input_raster,
-            "cellSize": cell_size,
-            "workspace": arcpy.env.workspace,
-            "scratchWorkspace": arcpy.env.scratchWorkspace
-        }
+
+        # Sanity Check
+        if int(arcpy.management.GetCount(boundary_shapefile).getOutput(0)) == 0:
+            raise RuntimeError("Boundary shapefile is empty. Cannot create mask.")
+
         try:
-            # Set the environment to the intersection extent of DEM and backscatter
-            message = "Setting environment to input DEM..."
-            self.message_length = Utils.print_progress(message, self.message_length)
+            # Prepare Environment
+            desc = arcpy.Describe(self.input_raster)
             arcpy.env.overwriteOutput = True
+            arcpy.env.snapRaster = self.input_raster
+            arcpy.env.cellSize = self.input_raster
             arcpy.env.extent = desc.extent
-            arcpy.env.snapRaster = input_raster
-            arcpy.env.cellSize = cell_size
-            arcpy.env.workspace = self.local_temp
-            arcpy.env.scratchWorkspace = self.temp_workspace
+            arcpy.env.workspace = self.temp_gdb
+            
+            # CRITICAL: LZW Compression
+            arcpy.env.compression = "LZW"
 
-            # Rasterize the boundary shapefile
-            message = "Rasterizing the boundary shapefile..."
+            # 1. Generating Constant Raster
+            message = "Generating Constant Raster..."
             self.message_length = Utils.print_progress(message, self.message_length)
-            arcpy.PolygonToRaster_conversion(boundary_shapefile, "FID", boundary_raster, "CELL_CENTER", "", input_raster)
-            self.temp_files.extend([boundary_raster])
+            
+            # Create a virtual raster of 1s with exact dimensions of input
+            # arguments: constant_value, data_type, cell_size, extent
+            const_raster = arcpy.sa.CreateConstantRaster(
+                1, 
+                "INTEGER", 
+                self.input_raster, 
+                self.input_raster
+            )
 
-            # Generate the binary mask (1 for boundary, 0 for everything else)
-            message = "Generating binary mask..."
+            message = "Extracting by Mask (Rasterizing)..."
             self.message_length = Utils.print_progress(message, self.message_length)
-            binary_mask_raster = Con(IsNull(Raster(boundary_raster)), 0, 1)
-            print()
-            # Save the binary mask
+            
+            # Use the boundary polygon to mask the constant raster
+            # Result: 1 inside polygon, NoData outside
+            masked_raster = arcpy.sa.ExtractByMask(const_raster, boundary_shapefile)
+
+            message = "Saving final binary mask (0/1)..."
+            self.message_length = Utils.print_progress(message, self.message_length)
+            
+            # Convert NoData to 0 for the final binary mask
+            # Con(IsNull(raster), 0, 1) -> If NoData, set 0. Else set 1.
+            # Note: masked_raster is 1 or NoData.
+            binary_mask_raster = Con(IsNull(masked_raster), 0, 1)
             binary_mask_raster.save(binary_mask)
-            print(f"Binary mask created with dimensions: {binary_mask_raster.width}x{binary_mask_raster.height}, cell size: {binary_mask_raster.meanCellHeight}x{binary_mask_raster.meanCellWidth}")
-
+            
         except Exception as e:
-            print(f"An error occurred while creating the binary mask: {e}")
-
+            print(f"Error creating binary mask: {e}")
+            raise
         finally:
-            # Reset the environment settings to avoid referencing deleted files
-            arcpy.env.overwriteOutput = original_settings["overwriteOutput"]
-            arcpy.env.snapRaster = original_settings["snapRaster"]
-            arcpy.env.extent = original_settings["extent"]
-            arcpy.env.cellSize = original_settings["cellSize"]
-            arcpy.env.workspace = original_settings["workspace"]
-            arcpy.env.scratchWorkspace = original_settings["scratchWorkspace"]
+            arcpy.ClearEnvironment("compression")
 
         return binary_mask
 
-    def trim_raster(self, input_raster_path, binary_mask, overwrite=False):
-        """Trim the raster using the binary mask, replacing zeros with NoData.
-        If overwrite=True, attempts to overwrite the original raster; otherwise, saves as a new file.
-        Note: Overwriting a TIFF in-place with ArcPy Raster.save() is not supported. Always write to a new file, then replace if needed.
+    def get_data_boundary(self, min_area=50):
         """
-        # Store original environment settings to restore them later
-        original_settings = {
-            "snapRaster": arcpy.env.snapRaster,
-            "cellSize": arcpy.env.cellSize,
-            "outputCoordinateSystem": arcpy.env.outputCoordinateSystem,
-            "extent": arcpy.env.extent,
-            "workspace": arcpy.env.workspace,
-            "scratchWorkspace": arcpy.env.scratchWorkspace,
-            "overwriteOutput": arcpy.env.overwriteOutput
-        }
-        try:
-            if not arcpy.Exists(input_raster_path):
-                raise FileNotFoundError(f"Input raster not found: {input_raster_path}")
-            else:
-                message = "Trimming the raster using the binary mask..."
-                self.message_length = Utils.print_progress(message, self.message_length)
-                name = Utils.sanitize_path_to_name(input_raster_path)
-                # Always write to a temporary file first
-                trimmed_raster_path = os.path.join(self.save_path, f"{name}_trimmed.tif")
-                mask = Raster(binary_mask)
-                # Convert binary mask to 1, NoData
-                valid_mask = SetNull(mask == 0, mask)
-                message = "Converting binary mask to 1, NoData..."
-                self.message_length = Utils.print_progress(message, self.message_length)
-
-                # Set environment to match input raster
-                arcpy.env.snapRaster = input_raster_path
-                arcpy.env.cellSize = input_raster_path
-                arcpy.env.outputCoordinateSystem = arcpy.Describe(input_raster_path).spatialReference
-                arcpy.env.extent = arcpy.Describe(input_raster_path).extent
-                arcpy.env.workspace = self.local_temp
-                arcpy.env.scratchWorkspace = self.temp_workspace
-                arcpy.env.overwriteOutput = True
-
-                # Apply the mask to the raster
-                trimmed_raster = Raster(input_raster_path) * valid_mask
-
-                # Save the trimmed raster
-                trimmed_raster.save(trimmed_raster_path)
-                print(f"Trimmed raster saved to: {trimmed_raster_path}")
-
-                # If overwrite=True, replace the original file after saving
-                if overwrite:
-                    try:
-                        # Release ArcPy raster references
-                        # This is important to avoid file locks when trying to delete or rename files
-                        message = "Attempting to overwrite the original raster..."
-                        self.message_length = Utils.print_progress(message, self.message_length)    
-                        del trimmed_raster
-                        # Delete associated files (.tif.aux.xml, .tfw, etc.)
-                        base, ext = os.path.splitext(trimmed_raster_path)
-                        for suffix in [".tif.aux.xml", ".tfw", ".tif.ovr"]:
-                            aux_file = base + suffix
-                            if os.path.exists(aux_file):
-                                os.remove(aux_file)
-                        import gc # Imports the garbage collection module, which provides access to the Python garbage collector.
-                        gc.collect() # Explicitly runs garbage collection to free up unreferenced memory objects.
-                        # Use ArcPy to delete the original raster (handles locks better than os.remove)
-                        if arcpy.Exists(input_raster_path):
-                            arcpy.Delete_management(input_raster_path)
-                        # Now rename the trimmed raster to the original path
-                        arcpy.management.CopyRaster(in_raster=trimmed_raster_path, out_rasterdataset= input_raster_path, format="TIFF")
-                        arcpy.Delete_management(trimmed_raster_path)  # Remove the temporary trimmed file
-                        # Add the original raster to temp files for cleanup
-                        print(f"Original raster overwritten: {input_raster_path}")
-                        return input_raster_path
-                    except Exception as e:
-                        print(f"Failed to overwrite original raster: {e}")
-                        return trimmed_raster_path
-                else:
-                    return trimmed_raster_path
-        finally:
-            # Restore environment settings
-            arcpy.env.snapRaster = original_settings["snapRaster"]
-            arcpy.env.cellSize = original_settings["cellSize"]
-            arcpy.env.outputCoordinateSystem = original_settings["outputCoordinateSystem"]
-            arcpy.env.extent = original_settings["extent"]
-            arcpy.env.workspace = original_settings["workspace"]
-            arcpy.env.scratchWorkspace = original_settings["scratchWorkspace"]
-            arcpy.env.overwriteOutput = original_settings["overwriteOutput"]
-
-    def get_data_boundary(self, min_area=50, shrink_boundary_pixels=0):
+        Generate boundary vectors and mask.
+        Uses GDB Feature Classes for intermediate vectors to avoid Shapefile 2GB limit.
         """
-        Generate a shapefile of the data boundary, create a binary mask, and trim the filled raster.
-
-        min_area is only set by the caller (e.g., HabitatDerivatives), not overwritten here.
-        """
-
         input_raster = self.input_raster
-        temp_integer_raster = None
-        temp_polygon = None
-        dissolved_polygon = None
-        cleaned_polygon = None
         
-        # Store original environment settings to restore them later
+        # Intermediate paths in GDB (Safe for large data)
+        temp_integer_raster = os.path.join(self.temp_gdb, "integer_temp")
+        temp_polygon = os.path.join(self.temp_gdb, "temp_polygon_fc")
+        dissolved_polygon_fc = os.path.join(self.temp_gdb, "dissolved_polygon_fc")
+        cleaned_polygon_fc = os.path.join(self.temp_gdb, "cleaned_polygon_fc")
+        
+        # Final Output Shapefile (Simplified, so likely safe size)
+        shapefile_dir = os.path.join(self.save_path, "boundary_shapefile")
+        os.makedirs(shapefile_dir, exist_ok=True)
+        final_shapefile_path = os.path.join(shapefile_dir, f"{self.dem_name}_boundary.shp")
+
         original_settings = {
             "overwriteOutput": arcpy.env.overwriteOutput,
             "extent": arcpy.env.extent,
@@ -453,110 +483,195 @@ class Inpainter:
             "workspace": arcpy.env.workspace,
             "scratchWorkspace": arcpy.env.scratchWorkspace
         }
+        
         try:
-            message = "Setting environment to DEM and properties..."
+            message = "Setting environment..."
             self.message_length = Utils.print_progress(message, self.message_length)
-            desc = arcpy.Describe(input_raster)  # Set once and reuse
-            cell_size = arcpy.management.GetRasterProperties(input_raster, "CELLSIZEX").getOutput(0)
+            
             arcpy.env.overwriteOutput = True
-            arcpy.env.extent = desc.extent
+            arcpy.env.extent = input_raster
             arcpy.env.snapRaster = input_raster
-            arcpy.env.cellSize = cell_size
-            arcpy.env.workspace = self.local_temp
-            arcpy.env.scratchWorkspace = self.temp_workspace
+            arcpy.env.cellSize = input_raster
+            arcpy.env.workspace = self.temp_gdb
+            arcpy.env.scratchWorkspace = self.temp_gdb
 
-            message = "Generating data boundary shapefile..."
-            self.message_length = Utils.print_progress(message, self.message_length)
-            # Ensure the shapefile directory exists
-            shapefile_dir = os.path.join(self.save_path, "boundary_shapefile")
-            os.makedirs(shapefile_dir, exist_ok=True)
-
-            # Step 1: Convert the raster to integer type
-            temp_integer_raster = os.path.join(self.local_temp, "integer.tif")
             message = "Converting raster to integer type..."
             self.message_length = Utils.print_progress(message, self.message_length)
-
-            # If input is Null, result is Null. If input has data, result is 1.
-            # SetNull(condition, value_if_false) -> If IsNull is true, set to Null. Else 1.
+            
+            # Use SetNull to preserve NoData properly
             data_mask = arcpy.sa.SetNull(arcpy.sa.IsNull(self.input_raster), 1)
+            # Save to GDB Raster
             temp_integer_raster_obj = arcpy.sa.Int(data_mask)
-            temp_integer_raster_obj.save(temp_integer_raster) # Explicit save helps with locks sometimes
-            # --- FIX END ---
+            temp_integer_raster_obj.save(temp_integer_raster)
 
-            # Step 2: Convert the integer raster to polygons
-            temp_polygon = os.path.join(self.local_temp, "temp_polygon.shp")
-            message = "Converting raster to polygons..."
+            message = "Converting raster to polygons (GDB)..."
             self.message_length = Utils.print_progress(message, self.message_length)
+            # Conversion to FileGDB Feature Class supports huge outputs
             arcpy.RasterToPolygon_conversion(temp_integer_raster, temp_polygon, "NO_SIMPLIFY", "VALUE")
 
-            # Step 3: Dissolve polygons to create a single boundary
-            dissolved_polygon = os.path.join(self.local_temp, "dissolved_polygon.shp")
-            # Remove all files with the dissolved_polygon base name (shapefile and its sidecar files)
-            for ext in [".shp", ".shx", ".dbf", ".prj", ".cpg", ".sbn", ".sbx", ".fbn", ".fbx", ".ain", ".aih", ".ixs", ".mxs", ".atx", ".shp.xml", ".qix"]:
-                f = dissolved_polygon.replace(".shp", ext)
-                if os.path.exists(f):
-                    os.remove(f)
             message = "Dissolving polygons..."
             self.message_length = Utils.print_progress(message, self.message_length)
-            arcpy.Dissolve_management(temp_polygon, dissolved_polygon)
+            arcpy.Dissolve_management(temp_polygon, dissolved_polygon_fc)
 
-            # Step 4: Eliminate small polygons (Requires Advanced License)
-
-            cleaned_polygon = os.path.join(self.local_temp, "cleaned_polygon.shp")
-            if os.path.exists(cleaned_polygon):
-                os.remove(cleaned_polygon)  # Delete existing file
-            message = "min_area for polygon management set to: " + str(min_area)
+            message = "Filtering small polygons..."
             self.message_length = Utils.print_progress(message, self.message_length)
+            
             if arcpy.CheckProduct("ArcInfo") == "Available":
-                # Do not overwrite min_area here
+                print("Using ArcInfo EliminatePolygonPart_management")
                 arcpy.EliminatePolygonPart_management(
-                    in_features=dissolved_polygon,
-                    out_feature_class=cleaned_polygon,
+                    in_features=dissolved_polygon_fc,
+                    out_feature_class=cleaned_polygon_fc,
                     part_area=min_area,
                     part_option="ANY"
                 )
             else:
-                arcpy.AddWarning("Advanced license not available. Cannot use EliminatePolygonPart_management.")
-                # If the advanced license is not available, we cannot use EliminatePolygonPart_management
-                print("Unable to use EliminatePolygonPart_management with min_area.")
-                # Use a different method to filter polygons based on area (not yet implemented)
-                # For now, just copy the dissolved polygon to cleaned_polygon
-                cleaned_polygon = dissolved_polygon
+                arcpy.CopyFeatures_management(dissolved_polygon_fc, cleaned_polygon_fc)
 
-            dissolved_polygon_path = os.path.join(shapefile_dir, f"{self.dem_name}_boundary.shp")
-            if os.path.exists(dissolved_polygon_path):
-                message = "Deleting existing shapefile"
-                self.message_length = Utils.print_progress(message, self.message_length)
-                arcpy.Delete_management(dissolved_polygon_path)  # Ensure no file conflicts
+            if os.path.exists(final_shapefile_path):
+                arcpy.Delete_management(final_shapefile_path)
 
-            if shrink_boundary_pixels > 0:
-                # Step 5: Shrink the boundary by n pixels if necessary
-                message = f"Shrinking the boundary by {shrink_boundary_pixels} pixels..."
-                self.message_length = Utils.print_progress(message, self.message_length)
-                shrink_distance = -shrink_boundary_pixels  # Negative distance for shrinking
-                arcpy.Buffer_analysis(cleaned_polygon, dissolved_polygon_path, shrink_distance, "FULL", "ROUND", "ALL")
-            else:
-                arcpy.CopyFeatures_management(cleaned_polygon, dissolved_polygon_path)
+            message = "Saving final boundary shapefile..."
+            self.message_length = Utils.print_progress(message, self.message_length)
+            arcpy.CopyFeatures_management(cleaned_polygon_fc, final_shapefile_path)
 
-            # Create the binary mask (will use input_tif extent)
-            binary_mask_path = self.create_binary_mask(input_raster, dissolved_polygon_path)
+            # Do this before rasterization to prevent errors from Dissolve artifacts
+            message = "Repairing boundary geometry..."
+            self.message_length = Utils.print_progress(message, self.message_length)
+            arcpy.management.RepairGeometry(final_shapefile_path)
 
-            # Track temporary files for cleanup
-            self.temp_files.extend([temp_integer_raster, temp_polygon, dissolved_polygon, cleaned_polygon])
+            # Create the binary mask from the simplified shapefile
+            binary_mask_path = self.create_binary_mask_from_boundary(final_shapefile_path)
 
         except Exception as e:
-            print(f"An error occurred while generating the data boundary: {e}")
-            raise  # Re-raise the exception for the caller to handle
+            print(f"Error generating boundary: {e}")
+            raise 
 
         finally:
-            # Reset the environment settings to avoid referencing deleted files
-            arcpy.env.overwriteOutput = original_settings["overwriteOutput"]
-            arcpy.env.snapRaster = original_settings["snapRaster"]
-            arcpy.env.extent = original_settings["extent"]
-            arcpy.env.cellSize = original_settings["cellSize"]
-            arcpy.env.workspace = original_settings["workspace"]
-            arcpy.env.scratchWorkspace = original_settings["scratchWorkspace"]
+            # Cleanup temp GDB items to save space
+            for item in [temp_integer_raster, temp_polygon, dissolved_polygon_fc, cleaned_polygon_fc]:
+                if arcpy.Exists(item):
+                    try: arcpy.Delete_management(item)
+                    except: pass
+            
+            # Restore Env
+            for k, v in original_settings.items():
+                setattr(arcpy.env, k, v)
 
-        return binary_mask_path, dissolved_polygon_path
+        return binary_mask_path, final_shapefile_path
+    
+    def get_data_boundary_MajorityFilter(self):
+        """
+        Generate binary mask and boundary vector.
+        
+        NEW APPROACH (Raster-First):
+        1. Generate Binary Mask directly from Raster (Fast).
+        2. Clean Mask using MajorityFilter (Removes noise).
+        3. Convert Clean Mask to Polygon (Fast).
+        
+        This avoids the "Raster->Vector->Raster" roundtrip that crashes on large files.
+        """
+        input_raster = self.input_raster
+        
+        # Paths
+        binary_mask_path = os.path.join(self.save_path, f"{self.dem_name}_binary_mask.tif")
 
+        
+        shapefile_dir = os.path.join(self.save_path, "boundary_shapefile")
+        os.makedirs(shapefile_dir, exist_ok=True)
+        final_shapefile_path = os.path.join(shapefile_dir, f"{self.dem_name}_boundary.shp")
 
+        # GDB Paths
+        raw_mask_raster = os.path.join(self.temp_gdb, "raw_mask")
+        clean_mask_raster = os.path.join(self.temp_gdb, "clean_mask")
+        temp_polygon = os.path.join(self.temp_gdb, "temp_boundary_poly")
+
+        original_settings = {
+            "overwriteOutput": arcpy.env.overwriteOutput,
+            "extent": arcpy.env.extent,
+            "snapRaster": arcpy.env.snapRaster,
+            "cellSize": arcpy.env.cellSize,
+            "compression": arcpy.env.compression
+        }
+        
+        try:
+            if not arcpy.Exists(binary_mask_path):
+                message = "Generating Raster Mask..."
+                self.message_length = Utils.print_progress(message, self.message_length)
+                
+                arcpy.env.overwriteOutput = True
+                arcpy.env.extent = input_raster
+                arcpy.env.snapRaster = input_raster
+                arcpy.env.cellSize = input_raster
+                arcpy.env.compression = "LZW"
+
+                # 1. Create Raw Mask (1=Data, 0=NoData)
+                # Use Con(IsNull) logic which is extremely fast and stable
+                # If IsNull(raster) is True -> 0 (Background)
+                # Else -> 1 (Data)
+                raw_mask_obj = Con(IsNull(Raster(input_raster)), 0, 1)
+                
+                # Save raw mask temporarily
+                raw_mask_obj.save(raw_mask_raster)
+
+                # 2. Clean the Mask (Remove "Salt and Pepper" noise)
+                # MajorityFilter helps remove single stray pixels (islands)
+                # Repeated application mimics removing small polygons
+                message = "Cleaning Mask (Removing noise)..."
+                self.message_length = Utils.print_progress(message, self.message_length)
+                
+                # Apply MajorityFilter (4 neighbors, Majority)
+                # This replaces isolated 1s with 0s and isolated 0s with 1s
+                cleaned_obj = MajorityFilter(raw_mask_obj, "EIGHT", "MAJORITY")
+                
+                # Optional: Run BoundaryClean to smooth edges (blocky -> smooth)
+                # cleaned_obj = BoundaryClean(cleaned_obj, "NO_SORT", "TWO_WAY")
+                
+                # Save final TIFF mask
+                message = "Saving Binary Mask TIFF..."
+                self.message_length = Utils.print_progress(message, self.message_length)
+                cleaned_obj.save(binary_mask_path)
+
+            else:
+                cleaned_obj = Raster(binary_mask_path)
+            
+            if not arcpy.Exists(final_shapefile_path):
+                # --- FIX: Filter in Raster Domain (Avoids SQL) ---
+                message = "Isolating data areas..."
+                self.message_length = Utils.print_progress(message, self.message_length)
+                
+                # Set 0s to NoData. Result contains ONLY 1s.
+                # RasterToPolygon will ignores NoData, so we get only the boundary we want.
+                only_ones_raster = SetNull(cleaned_obj == 0, cleaned_obj)
+                
+                # 3. Generate Vector Boundary
+                message = "Converting to Boundary Shapefile..."
+                self.message_length = Utils.print_progress(message, self.message_length)
+                
+                # Convert
+                arcpy.conversion.RasterToPolygon(only_ones_raster, temp_polygon, "SIMPLIFY", "Value")
+
+                # Save final shapefile
+                if os.path.exists(final_shapefile_path):
+                    arcpy.Delete_management(final_shapefile_path)
+                    
+                arcpy.management.CopyFeatures(temp_polygon, final_shapefile_path)
+                
+                message = "Boundary generation complete."
+                self.message_length = Utils.print_progress(message, self.message_length)
+
+        except Exception as e:
+            print(f"Error generating boundary: {e}")
+            raise 
+
+        finally:
+            # Cleanup GDB items
+            for item in [raw_mask_raster, clean_mask_raster, temp_polygon]:
+                if arcpy.Exists(item):
+                    try: arcpy.Delete_management(item)
+                    except: pass
+            
+            # Restore Env
+            for k, v in original_settings.items():
+                setattr(arcpy.env, k, v)
+
+        return binary_mask_path, final_shapefile_path

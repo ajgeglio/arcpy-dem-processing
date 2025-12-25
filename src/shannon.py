@@ -19,6 +19,7 @@ import numpy as np
 from scipy import ndimage
 from scipy.stats import entropy
 from numba import njit
+import uuid
 
 # Try imports for optional dependencies to prevent immediate import errors
 try:
@@ -291,7 +292,6 @@ class ShannonDerivatives:
         Explicitly handles workspaces to prevent 'Invalid Output Workspace' errors
         caused by cleanup scripts deleting previous scratch folders.
         """
-        import uuid
         
         # 1. Capture Global Environment (Everything that might affect execution)
         global_env = {
@@ -315,7 +315,7 @@ class ShannonDerivatives:
             arcpy.env.scratchWorkspace = safe_temp_dir
             
             # Set Grid settings
-            input_raster = arcpy.Raster(self.dem_path)
+            input_raster = arcpy.Raster(self.input_dem_path)
             arcpy.env.extent = input_raster.extent
             arcpy.env.snapRaster = input_raster
             arcpy.env.cellSize = input_raster

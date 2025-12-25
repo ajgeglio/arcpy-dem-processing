@@ -166,7 +166,7 @@ class WorkspaceCleaner:
 
 class Utils:
     @staticmethod
-    def remove_additional_files(directory, exts=[".cpg", ".dbf", ".tfw", ".xml"]):
+    def remove_additional_files(directory, exts=['.lock', '.cpg']):
         """Recursively remove additional files with specified extensions in directory and subdirectories."""
         removed_files = []
         for root, dirs, files in os.walk(directory):

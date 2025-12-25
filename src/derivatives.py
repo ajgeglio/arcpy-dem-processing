@@ -1,9 +1,8 @@
+import arcpy
 import numpy as np
-import os
 from skimage.feature import local_binary_pattern
 from scipy import ndimage
 from osgeo import gdal
-import arcpy
 from arcpy.sa import *
 from shannon import ShannonDerivatives
 

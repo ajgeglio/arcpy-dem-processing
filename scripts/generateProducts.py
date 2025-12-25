@@ -24,9 +24,8 @@ def main():
     parser.add_argument("--shannon_window", type=int, nargs="+", default=[3, 9, 21], help="Window sizes for shannon index (e.g. 3 9 21).")
     parser.add_argument("--fill_method", type=str, default="IDW", choices=["IDW", "FocalStatistics", "NoFill"], help="Method to fill voids in the DEM, or skip filling with NoFill.")
     parser.add_argument("--fill_iterations", type=int, default=1, help="Number of iterations for filling voids in the DEM.")
+    parser.add_argument("--water_elevation", type=int, default=183.6, help="Water elevation (m) for the depth raster, defaults to high elevation reference for the Great Lakes")
     parser.add_argument("--keep_chunks", action="store_true", help="Save the DEM chunks. Best to do this during testing of large products.")
-    parser.add_argument("--bypass_depth", action="store_true", help="Bypass creation of the depth raster, the default behavior is to convert to depth if elevation DEM is given.")
-    parser.add_argument("--water_elevation", type=int, default=183.6, help="Water elevation (m) for the depth raster, default is the a high elevation marker for the Great Lakes")
     parser.add_argument("--bypass_mosaic", action="store_true", help="Bypass creation of the depth raster, the default behavior is to convert to depth if elevation DEM is given.")
 
     # Updated choices to include landform options
@@ -34,10 +33,10 @@ def main():
                         default=["slope", "aspect", "roughness", "tpi", "tri", "hillshade"],
                         choices=[
                             "slope", "aspect", "roughness", "tpi", "tri", "hillshade", # standard gdal products
-                            "shannon_index",  # window radii based on input
+                            "shannon",  # window radii based on input
                             "lbp-8-1", "lbp-15-2", "lbp-21-4", "lbp", # defaults to n=21 and r=4
                             "bathymorphons", # defaults to create all
-                            "dem", # just return dem
+                            "filled", # return filled dem - filled during tiling
                             "None" # don't process dem
                         ],
                         metavar="PRODUCTS",
@@ -52,7 +51,6 @@ def main():
     BINARY_MASK = args.input_binary_mask if args.input_binary_mask else None
     RASTER_DIR = os.path.dirname(os.path.abspath(INPUT_DEM))
     PRODUCTS = args.products
-    BYPASSDEPTH = args.bypass_depth
     BYPASSMOSAIC = args.bypass_mosaic
     DIVISIONS = args.divisions   
     SHANNON_WIN = args.shannon_window
@@ -117,9 +115,8 @@ def main():
                                 fill_iterations=FILL_ITERATIONS,
                                 divisions=DIVISIONS,
                                 keep_chunks=KEEP_CHUNKS,
-                                bypass_depth=BYPASSDEPTH,
+                                water_elevation=WATERELEVATION,
                                 bypass_mosaic=BYPASSMOSAIC,
-                                water_elevation=WATERELEVATION
                                 )
         generateDerivatives.process_dem()
 

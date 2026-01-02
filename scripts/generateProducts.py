@@ -12,7 +12,6 @@ if SRC_DIR not in sys.path:
 from utils import Utils
 from processDem import ProcessDem
 from extents import GetExtents
-from rasterMasking import RasterMasking
 
 def main():
     # Set up argument parser
@@ -24,13 +23,14 @@ def main():
     parser.add_argument("--shannon_window", type=int, nargs="+", default=[3, 9, 21], help="Window sizes for shannon index (e.g. 3 9 21).")
     parser.add_argument("--fill_method", type=str, default="IDW", choices=["IDW", "FocalStatistics", "NoFill"], help="Method to fill voids in the DEM, or skip filling with NoFill.")
     parser.add_argument("--fill_iterations", type=int, default=1, help="Number of iterations for filling voids in the DEM.")
+    parser.add_argument("--min_area", type=int, default=50, help="Minimum area to filter boundary polygon in Eliminate Polygon Part (Data Management) prior to binary mask creation.")
     parser.add_argument("--water_elevation", type=int, default=183.6, help="Water elevation (m) for the depth raster, defaults to high elevation reference for the Great Lakes")
     parser.add_argument("--keep_chunks", action="store_true", help="Save the DEM chunks. Best to do this during testing of large products.")
     parser.add_argument("--bypass_mosaic", action="store_true", help="Bypass creation of the depth raster, the default behavior is to convert to depth if elevation DEM is given.")
 
     # Updated choices to include landform options
     parser.add_argument("--products", type=str, nargs="+", 
-                        default=["slope", "aspect", "roughness", "tpi", "tri", "hillshade"],
+                        default=["slope", "aspect", "roughness", "tpi", "tri", "hillshade", "lbp", "bathymorphons", "filled"],
                         choices=[
                             "slope", "aspect", "roughness", "tpi", "tri", "hillshade", # standard gdal products
                             "shannon",  # window radii based on input
@@ -45,7 +45,7 @@ def main():
     # Parse arguments
     args = parser.parse_args()
     
-    # Setup Variables
+    # Setup Variables for cleanliness
     INPUT_DEM = args.input_dem
     INPUT_BS = args.input_bs if args.input_bs else None
     BINARY_MASK = args.input_binary_mask if args.input_binary_mask else None
@@ -56,6 +56,7 @@ def main():
     SHANNON_WIN = args.shannon_window
     KEEP_CHUNKS = args.keep_chunks
     WATERELEVATION = args.water_elevation
+    MIN_AREA = args.min_area
 
     # Basic validation
     if not INPUT_DEM:
@@ -113,6 +114,7 @@ def main():
                                 shannon_window=SHANNON_WIN,
                                 fill_method=FILL_METHOD,
                                 fill_iterations=FILL_ITERATIONS,
+                                min_area=MIN_AREA,
                                 divisions=DIVISIONS,
                                 keep_chunks=KEEP_CHUNKS,
                                 water_elevation=WATERELEVATION,

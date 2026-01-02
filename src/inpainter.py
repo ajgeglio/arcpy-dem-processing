@@ -4,7 +4,7 @@ from utils import Utils
 import arcpy
 from arcpy.sa import *
 import uuid
-from arcpy.sa import FocalStatistics, Con, IsNull, Raster, NbrRectangle, Abs, SetNull, Idw, RadiusFixed
+from arcpy.sa import FocalStatistics, Con, IsNull, Raster, NbrRectangle, Abs, SetNull, Idw, RadiusFixed, MajorityFilter
 import shutil
 
 class Inpainter:
@@ -518,13 +518,9 @@ class Inpainter:
             
             if arcpy.CheckProduct("ArcInfo") == "Available":
                 print("Using ArcInfo EliminatePolygonPart_management")
-                arcpy.EliminatePolygonPart_management(
-                    in_features=dissolved_polygon_fc,
-                    out_feature_class=cleaned_polygon_fc,
-                    part_area=min_area,
-                    part_option="ANY"
-                )
+                arcpy.EliminatePolygonPart_management(dissolved_polygon_fc, cleaned_polygon_fc, "AREA", min_area, "", "ANY")
             else:
+                print("Unable to access ArcInfo EliminatePolygonPart_management")
                 arcpy.CopyFeatures_management(dissolved_polygon_fc, cleaned_polygon_fc)
 
             if os.path.exists(final_shapefile_path):
@@ -559,31 +555,25 @@ class Inpainter:
 
         return binary_mask_path, final_shapefile_path
     
-    def get_data_boundary_MajorityFilter(self):
+    def get_data_boundary_majorityfilter(self):
         """
-        Generate binary mask and boundary vector.
-        
-        NEW APPROACH (Raster-First):
-        1. Generate Binary Mask directly from Raster (Fast).
-        2. Clean Mask using MajorityFilter (Removes noise).
-        3. Convert Clean Mask to Polygon (Fast).
-        
-        This avoids the "Raster->Vector->Raster" roundtrip that crashes on large files.
+        Generates boundary using Iterative Majority Filtering.
+        This avoids the 'RegionGroup' memory crash by using local window cleaning
+        instead of global region indexing.
         """
+       
         input_raster = self.input_raster
         
         # Paths
-        binary_mask_path = os.path.join(self.save_path, f"{self.dem_name}_binary_mask.tif")
-
-        
         shapefile_dir = os.path.join(self.save_path, "boundary_shapefile")
         os.makedirs(shapefile_dir, exist_ok=True)
         final_shapefile_path = os.path.join(shapefile_dir, f"{self.dem_name}_boundary.shp")
+        binary_mask_path = os.path.join(self.save_path, f"{self.dem_name}_binary_mask.tif")
 
         # GDB Paths
-        raw_mask_raster = os.path.join(self.temp_gdb, "raw_mask")
-        clean_mask_raster = os.path.join(self.temp_gdb, "clean_mask")
-        temp_polygon = os.path.join(self.temp_gdb, "temp_boundary_poly")
+        raw_mask = os.path.join(self.temp_gdb, "raw_binary_mask")
+        clean_mask = os.path.join(self.temp_gdb, "clean_binary_mask")
+        temp_polygon = os.path.join(self.temp_gdb, "temp_poly_clean")
 
         original_settings = {
             "overwriteOutput": arcpy.env.overwriteOutput,
@@ -594,84 +584,79 @@ class Inpainter:
         }
         
         try:
-            if not arcpy.Exists(binary_mask_path):
-                message = "Generating Raster Mask..."
-                self.message_length = Utils.print_progress(message, self.message_length)
-                
-                arcpy.env.overwriteOutput = True
-                arcpy.env.extent = input_raster
-                arcpy.env.snapRaster = input_raster
-                arcpy.env.cellSize = input_raster
-                arcpy.env.compression = "LZW"
+            arcpy.AddMessage("Starting Stability-Focused Boundary Generation...")
 
-                # 1. Create Raw Mask (1=Data, 0=NoData)
-                # Use Con(IsNull) logic which is extremely fast and stable
-                # If IsNull(raster) is True -> 0 (Background)
-                # Else -> 1 (Data)
-                raw_mask_obj = Con(IsNull(Raster(input_raster)), 0, 1)
-                
-                # Save raw mask temporarily
-                raw_mask_obj.save(raw_mask_raster)
-
-                # 2. Clean the Mask (Remove "Salt and Pepper" noise)
-                # MajorityFilter helps remove single stray pixels (islands)
-                # Repeated application mimics removing small polygons
-                message = "Cleaning Mask (Removing noise)..."
-                self.message_length = Utils.print_progress(message, self.message_length)
-                
-                # Apply MajorityFilter (4 neighbors, Majority)
-                # This replaces isolated 1s with 0s and isolated 0s with 1s
-                cleaned_obj = MajorityFilter(raw_mask_obj, "EIGHT", "MAJORITY")
-                
-                # Optional: Run BoundaryClean to smooth edges (blocky -> smooth)
-                # cleaned_obj = BoundaryClean(cleaned_obj, "NO_SORT", "TWO_WAY")
-                
-                # Save final TIFF mask
-                message = "Saving Binary Mask TIFF..."
-                self.message_length = Utils.print_progress(message, self.message_length)
-                cleaned_obj.save(binary_mask_path)
-
-            else:
-                cleaned_obj = Raster(binary_mask_path)
+            arcpy.env.overwriteOutput = True
+            arcpy.env.extent = input_raster
+            arcpy.env.snapRaster = input_raster
+            arcpy.env.cellSize = input_raster
+            arcpy.env.compression = "LZW"
+            arcpy.env.workspace = self.temp_gdb
             
-            if not arcpy.Exists(final_shapefile_path):
-                # --- FIX: Filter in Raster Domain (Avoids SQL) ---
-                message = "Isolating data areas..."
-                self.message_length = Utils.print_progress(message, self.message_length)
-                
-                # Set 0s to NoData. Result contains ONLY 1s.
-                # RasterToPolygon will ignores NoData, so we get only the boundary we want.
-                only_ones_raster = SetNull(cleaned_obj == 0, cleaned_obj)
-                
-                # 3. Generate Vector Boundary
-                message = "Converting to Boundary Shapefile..."
-                self.message_length = Utils.print_progress(message, self.message_length)
-                
-                # Convert
-                arcpy.conversion.RasterToPolygon(only_ones_raster, temp_polygon, "SIMPLIFY", "Value")
+            # 1. Create Binary Raster (0 = Background, 1 = Data)
+            # We MUST make background '0' (not NoData) so the filter sees it as a neighbor.
+            arcpy.AddMessage("Creating binary mask...")
+            binary_raster = Con(IsNull(Raster(input_raster)), 0, 1)
+            binary_raster.save(raw_mask)
+            
+            # 2. Iterative Cleaning (The Fix)
+            # Instead of counting regions, we erode them.
+            # Running MajorityFilter 4 times is roughly equivalent to removing 
+            # islands smaller than ~15-20 pixels, but it is rock-stable.
+            current_clean = Raster(raw_mask)
+            iterations = 4 
+            
+            for i in range(iterations):
+                arcpy.AddMessage(f"Cleaning pass {i+1} of {iterations} (Majority Filter)...")
+                # "EIGHT" checks diagonals. "MAJORITY" replaces pixel if >4 neighbors are different.
+                # If a '1' is surrounded by '0's, it becomes '0'.
+                current_clean = MajorityFilter(current_clean, "EIGHT", "MAJORITY")
+            
+            # 3. Finalize Mask
+            # Convert the '0' background back to NoData for the final polygon conversion
+            # (RasterToPolygon ignores NoData, which gives us the boundary we want)
+            arcpy.AddMessage("Finalizing mask...")
+            final_clean_raster = SetNull(current_clean == 0, 1)
+            
+            # Save TIFF for external use
+            clean_mask_tif_obj = Con(IsNull(final_clean_raster), 0, 1)
+            clean_mask_tif_obj.save(binary_mask_path)
+            
+            # 4. Convert to Vector
+            # Since noise is gone, this will be fast.
+            arcpy.AddMessage("Converting clean raster to vector...")
+            arcpy.conversion.RasterToPolygon(
+                in_raster=final_clean_raster,
+                out_polygon_features=temp_polygon,
+                simplify="SIMPLIFY",
+                raster_field="VALUE",
+                create_multipart_features="SINGLE_OUTER_PART"
+            )
 
-                # Save final shapefile
-                if os.path.exists(final_shapefile_path):
-                    arcpy.Delete_management(final_shapefile_path)
-                    
-                arcpy.management.CopyFeatures(temp_polygon, final_shapefile_path)
-                
-                message = "Boundary generation complete."
-                self.message_length = Utils.print_progress(message, self.message_length)
+            # 5. Save Final Shapefile
+            if arcpy.Exists(final_shapefile_path):
+                arcpy.management.Delete(final_shapefile_path)
+
+            arcpy.AddMessage("Saving final shapefile...")
+            arcpy.management.CopyFeatures(temp_polygon, final_shapefile_path)
+
+            # 6. Repair Geometry
+            arcpy.management.RepairGeometry(final_shapefile_path)
+            
+            return binary_mask_path, final_shapefile_path
 
         except Exception as e:
-            print(f"Error generating boundary: {e}")
+            import traceback
+            traceback.print_exc()
+            arcpy.AddError(f"Error in Boundary Generation: {e}")
             raise 
 
         finally:
-            # Cleanup GDB items
-            for item in [raw_mask_raster, clean_mask_raster, temp_polygon]:
-                if arcpy.Exists(item):
-                    try: arcpy.Delete_management(item)
-                    except: pass
-            
-            # Restore Env
+            # Restore Environment
             for k, v in original_settings.items():
                 setattr(arcpy.env, k, v)
-
-        return binary_mask_path, final_shapefile_path
+            
+            # Cleanup GDB
+            if arcpy.Exists(raw_mask):
+                try: arcpy.management.Delete(raw_mask)
+                except: pass

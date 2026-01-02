@@ -47,6 +47,7 @@ class ProcessDem:
         products=None,
         fill_method=None,
         fill_iterations=1,
+        min_area=50,
         water_elevation=183.6,
         keep_chunks=False,
         bypass_mosaic=False
@@ -66,6 +67,7 @@ class ProcessDem:
         # Store original spatial reference, cell size, and snap raster for assertion
         self.input_dem = input_dem if input_dem else None
         self.binary_mask = binary_mask if binary_mask else None
+        self.min_area = min_area
         # Ensure raster statistics exist before transformation
         try:
             # Try to get a property that requires stats
@@ -133,9 +135,9 @@ class ProcessDem:
         # but ensure they exist in scope.
         fill_m = self.fill_method
         fill_i = self.fill_iterations
-
+        min_area = self.min_area
         # 1. Handle Backscatter Alignment early (Unified)
-        if self.input_bs and self.input_dem:
+        if self.input_bs and self.input_dem and not self.binary_mask:
             # Only align if not already handled by a specific complex function later
             if not self.divisions: 
                 print("Aligning backscatter to DEM...")
@@ -147,12 +149,12 @@ class ProcessDem:
                 if fill_m is None:
                     print("No Fill method: Using input binary mask to trim final products.")
                 else:
-                    print("Filling deferred to tiling. WARNING: Unfilled masks will re-punch holes.")
+                    print("Filling deferred to tiling. WARNING: If input binary mask is not-filled, it will re-punch holes/voids during trimming.")
             else:
                 # Global Fill + Trim with provided mask
                 print("Filling and trimming using provided intersection mask...")
                 self.input_dem = MetaFunctions.fill_trim_with_intersection_mask(
-                    self.input_dem, self.input_bs, self.binary_mask, fill_m, fill_i
+                    self.input_dem, self.input_bs, self.binary_mask, fill_m, fill_i, min_area
                 )
 
         elif self.input_dem and not self.binary_mask:
@@ -167,14 +169,14 @@ class ProcessDem:
                 if self.input_bs:
                     print("Generating intersection mask and filling globally...")
                     trimmed_path, mask = MetaFunctions.fill_trim_make_intersection_mask(
-                        self.input_dem, self.input_bs, fill_m, fill_i
+                        self.input_dem, self.input_bs, fill_m, fill_i, min_area
                     )
                     self.input_dem, self.binary_mask = trimmed_path, mask
                 else:
                     if fill_m is not None:
                         print("Filling globally and generating mask...")
                         self.input_dem, self.binary_mask = MetaFunctions.fill_and_return_mask(
-                            self.input_dem, fill_m, fill_i
+                            self.input_dem, fill_m, fill_i, min_area
                         )
                     else:
                         print("No filling: Generating mask from raw DEM.")
@@ -636,30 +638,32 @@ class ProcessDem:
                         
                         # STEP B: Update Mask (If this is the filled DEM)
                         if product_key == 'filled':
-                            print("Generating authoritative binary mask from Filled DEM...")
-                            # This updates self.binary_mask so subsequent loops (Slope, Aspect) use the correct one
-                            self.binary_mask = ArcpyUtils.create_binary_mask(merged_dem, data_value=1, nodata_value=0)
-                            if self.fill_method in ["FocalStatistics", "IDW"]:
-                                shrink_cells = 0
-                                
-                                if self.fill_method == "FocalStatistics":
-                                    # Kernel was 9, so radius is 4
-                                    shrink_cells = 4 * self.fill_iterations
+                            if not self.binary_mask:
+                                print("Generating authoritative binary mask from Filled DEM...")
+                                # This updates self.binary_mask so subsequent loops (Slope, Aspect) use the correct one
+                                self.binary_mask = ArcpyUtils.create_binary_mask(merged_dem, data_value=1, nodata_value=0)
+
+                                if self.fill_method in ["FocalStatistics", "IDW"]:
+                                    shrink_cells = 0
                                     
-                                elif self.fill_method == "IDW":
-                                    # Search radius was set to 5.0 in the tiling loop
-                                    # If you changed the search_radius in the loop, update this number!
-                                    idw_radius = 5 
-                                    shrink_cells = idw_radius * self.fill_iterations
-                                
-                                if shrink_cells > 0:
-                                    print(f"Removing {self.fill_method} halo (Shrinking by {shrink_cells} cells)...")
-                                    # Apply Shrink (Erosion)
-                                    shrunk_mask = Shrink(self.binary_mask, shrink_cells, [1])
-                                    # Overwrite the mask file
-                                    shrunk_mask.save(self.binary_mask)
-                                    # Clean up
-                                    del shrunk_mask
+                                    if self.fill_method == "FocalStatistics":
+                                        # Kernel was 9, so radius is 4
+                                        shrink_cells = 4 * self.fill_iterations
+                                        
+                                    elif self.fill_method == "IDW":
+                                        # Search radius was set to 5.0 in the tiling loop
+                                        # If you changed the search_radius in the loop, update this number!
+                                        idw_radius = 5 
+                                        shrink_cells = idw_radius * self.fill_iterations
+                                    
+                                    if shrink_cells > 0:
+                                        print(f"Removing {self.fill_method} halo (Shrinking by {shrink_cells} cells)...")
+                                        # Apply Shrink (Erosion)
+                                        shrunk_mask = Shrink(self.binary_mask, shrink_cells, [1]) # type: Raster
+                                        # Overwrite the mask file
+                                        shrunk_mask.save(self.binary_mask)
+                                        # Clean up
+                                        del shrunk_mask
 
                         # STEP C: Post-process (Trim)
                         # We trim ALL products (including 'filled' itself to clean edges) using the new mask

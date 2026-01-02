@@ -6,15 +6,19 @@ import arcpy
 
 class MetaFunctions():
     @staticmethod
-    def fill_trim_with_intersection_mask(aligned_input_dem, aligned_input_bs, intersection_mask, fill_method="IDW", fill_iterations=1):
+    def fill_trim_with_intersection_mask(aligned_input_dem, aligned_input_bs, intersection_mask, fill_method="IDW", fill_iterations=1, min_area=50):
         """
         Generate a binary intersection mask by multiplying the valid data masks of two rasters.
         Returns the path to the intersection mask raster.
         """
         inpainter = Inpainter(input_raster=aligned_input_dem)
-        mask, dissolved_polygonf = inpainter.get_data_boundary(min_area=50)
         inpainterbs = Inpainter(input_raster=aligned_input_bs)
-        maskbs, dissolved_polygonbs = inpainterbs.get_data_boundary(min_area=50)
+        if arcpy.CheckProduct("ArcInfo") == "Available":
+            mask, dissolved_polygonf = inpainter.get_data_boundary(min_area=min_area)
+            maskbs, dissolved_polygonbs = inpainterbs.get_data_boundary(min_area=min_area)
+        else:
+            mask, dissolved_polygonf = inpainter.get_data_boundary_majorityfilter(min_area=min_area)
+            maskbs, dissolved_polygonbs = inpainterbs.get_data_boundary_majorityfilter(min_area=min_area)
         if fill_method is not None:
             # Generate the fill raster
             filled_dem_path = inpainter.fill_internal_gaps_arcpy(
@@ -44,7 +48,7 @@ class MetaFunctions():
         return trimmed_dem_path
 
     @staticmethod
-    def fill_trim_make_intersection_mask(input_dem, input_bs, fill_method, fill_iterations):
+    def fill_trim_make_intersection_mask(input_dem, input_bs, fill_method, fill_iterations, min_area=50):
         """
         Generate a binary intersection mask by multiplying the valid data masks of two rasters.
         Returns the path to the intersection mask raster.
@@ -52,15 +56,19 @@ class MetaFunctions():
         dem_name = Utils.sanitize_path_to_name(input_dem)
         directory = os.path.join(os.path.dirname(input_dem), "boundary_files")
         inpainter = Inpainter(input_raster=input_dem)
-        mask, dissolved_polygon = inpainter.get_data_boundary(min_area=50)
         inpainterbs = Inpainter(input_raster=input_bs)
-        maskbs, dissolved_polygonbs = inpainterbs.get_data_boundary(min_area=50)
+        if arcpy.CheckProduct("ArcInfo") == "Available":
+            mask, dissolved_polygonf = inpainter.get_data_boundary(min_area=min_area)
+            maskbs, dissolved_polygonbs = inpainterbs.get_data_boundary(min_area=min_area)
+        else:
+            mask, dissolved_polygonf = inpainter.get_data_boundary_majorityfilter(min_area=min_area)
+            maskbs, dissolved_polygonbs = inpainterbs.get_data_boundary_majorityfilter(min_area=min_area)
         if fill_method is not None:
             # Generate the fill raster
             filled_dem_path = inpainter.fill_internal_gaps_arcpy(
                 method=fill_method,
                 iterations=fill_iterations,
-                dissolved_polygon=dissolved_polygon,
+                dissolved_polygon=dissolved_polygonf,
                 overwrite=True
             )
             # Clean up the workspace
@@ -92,11 +100,14 @@ class MetaFunctions():
         return trimmed_dem_path, intersection_mask
     
     @staticmethod
-    def fill_and_return_mask(input_dem, fill_method="IDW", fill_iterations=1):
+    def fill_and_return_mask(input_dem, fill_method="IDW", fill_iterations=1, min_area=50):
         # generate the cleaned data boundary and binary mask tif
         inpainter = Inpainter(input_dem)
 
-        binary_mask, dissolved_polygon = inpainter.get_data_boundary(min_area=50)
+        if arcpy.CheckProduct("ArcInfo") == "Available":
+            mask, dissolved_polygon = inpainter.get_data_boundary(min_area=min_area)
+        else:
+            mask, dissolved_polygon = inpainter.get_data_boundary_majorityfilter(min_area=min_area)
 
         if fill_method is not None:
             # Generate the fill raster
@@ -112,21 +123,24 @@ class MetaFunctions():
             WorkspaceCleaner(inpainter).clean_up()
             filled_raster_path = input_dem
 
-        return filled_raster_path, binary_mask
+        return filled_raster_path, mask
         
     @staticmethod
-    def fill_mask_with_polygon_management(input_mask):
+    def fill_mask_with_polygon_management(input_mask, min_area=50):
         arcpy.env.overwriteOutput = True
         # generate the cleaned data boundary and binary mask tif
         inpainter = Inpainter(input_mask)
-        binary_mask, _ = inpainter.get_data_boundary(min_area=50)
+        if arcpy.CheckProduct("ArcInfo") == "Available":
+            mask, _ = inpainter.get_data_boundary(min_area=min_area)
+        else:
+            mask, _ = inpainter.get_data_boundary_majorityfilter(min_area=min_area)
         WorkspaceCleaner(inpainter).clean_up()
-        return binary_mask
+        return mask
 
     @staticmethod
     def return_mask_MajorityFilter(input_dem):
         # Create Inpainter just for mask generation
         inpainter = Inpainter(input_dem)
         # Generate Boundary/Mask (no Fill). We use the raw DEM to define the boundary
-        binary_mask, _ = inpainter.get_data_boundary_MajorityFilter()
-        return binary_mask
+        mask, _ = inpainter.get_data_boundary_majorityfilter()
+        return mask

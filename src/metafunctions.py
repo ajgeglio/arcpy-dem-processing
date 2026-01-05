@@ -12,13 +12,16 @@ class MetaFunctions():
         Returns the path to the intersection mask raster.
         """
         inpainter = Inpainter(input_raster=aligned_input_dem)
-        inpainterbs = Inpainter(input_raster=aligned_input_bs)
+        if aligned_input_bs:
+            inpainterbs = Inpainter(input_raster=aligned_input_bs)
         if arcpy.CheckProduct("ArcInfo") == "Available":
             mask, dissolved_polygonf = inpainter.get_data_boundary(min_area=min_area)
-            maskbs, dissolved_polygonbs = inpainterbs.get_data_boundary(min_area=min_area)
+            if aligned_input_bs:
+                maskbs, dissolved_polygonbs = inpainterbs.get_data_boundary(min_area=min_area)
         else:
             mask, dissolved_polygonf = inpainter.get_data_boundary_majorityfilter(min_area=min_area)
-            maskbs, dissolved_polygonbs = inpainterbs.get_data_boundary_majorityfilter(min_area=min_area)
+            if aligned_input_bs:
+                maskbs, dissolved_polygonbs = inpainterbs.get_data_boundary_majorityfilter(min_area=min_area)
         if fill_method is not None:
             # Generate the fill raster
             filled_dem_path = inpainter.fill_internal_gaps_arcpy(
@@ -30,21 +33,24 @@ class MetaFunctions():
             # Clean up the workspace
             WorkspaceCleaner(inpainter).clean_up()
             # Generate the fill for the other raster
-            filled_bs_path = inpainterbs.fill_internal_gaps_arcpy(
-                method=fill_method,
-                iterations=fill_iterations,
-                dissolved_polygon=dissolved_polygonbs,
-                overwrite=True
-            )
-            WorkspaceCleaner(inpainterbs).clean_up()
+            if aligned_input_bs:
+                filled_bs_path = inpainterbs.fill_internal_gaps_arcpy(
+                    method=fill_method,
+                    iterations=fill_iterations,
+                    dissolved_polygon=dissolved_polygonbs,
+                    overwrite=True
+                )
+                WorkspaceCleaner(inpainterbs).clean_up()
         else:
             print("Fill method NONE, returning aligned rasters and trimming to binary mask boundary provided")
             filled_dem_path, filled_bs_path = aligned_input_dem, aligned_input_bs
             WorkspaceCleaner(inpainter).clean_up()
-            WorkspaceCleaner(inpainterbs).clean_up()
+            if aligned_input_bs:
+                WorkspaceCleaner(inpainterbs).clean_up()
         # Trim the rasters to the intersection mask
         trimmed_dem_path = ArcpyUtils.trim_raster(filled_dem_path, intersection_mask, overwrite=True)
-        trimmed_bs_path = ArcpyUtils.trim_raster(filled_bs_path, intersection_mask, overwrite=True)
+        if aligned_input_bs:
+            trimmed_bs_path = ArcpyUtils.trim_raster(filled_bs_path, intersection_mask, overwrite=True)
         return trimmed_dem_path
 
     @staticmethod
@@ -56,13 +62,16 @@ class MetaFunctions():
         dem_name = Utils.sanitize_path_to_name(input_dem)
         directory = os.path.join(os.path.dirname(input_dem), "boundary_files")
         inpainter = Inpainter(input_raster=input_dem)
-        inpainterbs = Inpainter(input_raster=input_bs)
+        if input_bs:
+            inpainterbs = Inpainter(input_raster=input_bs)
         if arcpy.CheckProduct("ArcInfo") == "Available":
             mask, dissolved_polygonf = inpainter.get_data_boundary(min_area=min_area)
-            maskbs, dissolved_polygonbs = inpainterbs.get_data_boundary(min_area=min_area)
+            if input_bs:
+                maskbs, dissolved_polygonbs = inpainterbs.get_data_boundary(min_area=min_area)
         else:
             mask, dissolved_polygonf = inpainter.get_data_boundary_majorityfilter(min_area=min_area)
-            maskbs, dissolved_polygonbs = inpainterbs.get_data_boundary_majorityfilter(min_area=min_area)
+            if input_bs:
+                maskbs, dissolved_polygonbs = inpainterbs.get_data_boundary_majorityfilter(min_area=min_area)
         if fill_method is not None:
             # Generate the fill raster
             filled_dem_path = inpainter.fill_internal_gaps_arcpy(
@@ -74,18 +83,20 @@ class MetaFunctions():
             # Clean up the workspace
             WorkspaceCleaner(inpainter).clean_up()
             input_dem = filled_dem_path
-            # Generate the fill for the other raster
-            filled_bs_path = inpainterbs.fill_internal_gaps_arcpy(
-                method=fill_method,
-                iterations=fill_iterations,
-                dissolved_polygon=dissolved_polygonbs,
-                overwrite=True
-            )
-            WorkspaceCleaner(inpainterbs).clean_up()
-            input_bs = filled_bs_path
+            if input_bs:
+                # Generate the fill for the backscatter
+                filled_bs_path = inpainterbs.fill_internal_gaps_arcpy(
+                    method=fill_method,
+                    iterations=fill_iterations,
+                    dissolved_polygon=dissolved_polygonbs,
+                    overwrite=True
+                )
+                WorkspaceCleaner(inpainterbs).clean_up()
+                input_bs = filled_bs_path
         else:
             WorkspaceCleaner(inpainter).clean_up()
-            WorkspaceCleaner(inpainterbs).clean_up()
+            if input_bs:
+                WorkspaceCleaner(inpainterbs).clean_up()
         # create the intersection mask by multiplying the two masks
         output_mask_path = os.path.join(directory, f"{dem_name}_intersection_mask.tif")
         # Remove if exists
@@ -96,7 +107,8 @@ class MetaFunctions():
 
         # Trim the rasters to the intersection mask
         trimmed_dem_path = ArcpyUtils.trim_raster(input_dem, output_mask_path, overwrite=True)
-        trimmed_bs_path = ArcpyUtils.trim_raster(input_bs, output_mask_path, overwrite=True)
+        if input_bs:
+            trimmed_bs_path = ArcpyUtils.trim_raster(input_bs, output_mask_path, overwrite=True)
         return trimmed_dem_path, intersection_mask
     
     @staticmethod

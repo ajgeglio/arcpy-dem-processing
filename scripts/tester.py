@@ -1,114 +1,103 @@
 import arcpy
 from arcpy import env
-from arcpy.sa import Raster
+from arcpy.sa import * # Import Spatial Analyst tools like Con, SetNull
 import os
+import sys
+
+# Check out extension for Spatial Analyst tools
+arcpy.CheckOutExtension("Spatial")
+
+# Add your source paths
+sys.path.append("src")
+from utils import Utils
 from multiscaleAlignMasking import MultiscaleAlignMasking
+from processDem import ProcessDem
 
 class tester:
     try:        
-        # Set up a scratch workspace
-        arcpy.env.workspace = r"C:\Users\ageglio\AppData\Local\Temp\2"
-        arcpy.env.overwriteOutput = True  # Allow overwriting existing files
-        arcpy.env.scratchWorkspace = arcpy.env.workspace  # Set scratch workspace
+        # --- FIX 1: Create the directory using OS ---
+        temp_dir = os.path.join(os.getcwd(), "Temp")
+        if not os.path.exists(temp_dir):
+            os.makedirs(temp_dir)
+            print(f"Created dir: {temp_dir}")
+            
+        arcpy.env.workspace = temp_dir
+        arcpy.env.overwriteOutput = True 
+        arcpy.env.scratchWorkspace = temp_dir
         print(f"ArcPy workspace set to: {arcpy.env.workspace}")
 
-        # Create dummy rasters with different extents and some NoData
-        # Raster 1: Larger extent, some NoData
-        arcpy.management.CreateRasterDataset(
-            arcpy.env.workspace, "raster1.tif", 10, "32_BIT_FLOAT",
-            arcpy.SpatialReference(4326), 1
-        )
-        r1_path = os.path.join(arcpy.env.workspace, "raster1.tif")
-        # Initialize raster with constant value so UpdateCursor works
-        arcpy.sa.CreateConstantRaster(0, "FLOAT", 1).save(r1_path)
-        with arcpy.da.UpdateCursor(r1_path, ["VALUE"]) as cursor:
-            for i, row in enumerate(cursor):
-                if i < 5 or i > 15: # Create NoData at ends
-                    row[0] = -9999
-                else:
-                    row[0] = i
-                cursor.updateRow(row)
-        arcpy.management.SetRasterProperties(r1_path, "NODATA", "VALUE", "-9999")
-        arcpy.management.DefineProjection(r1_path, arcpy.SpatialReference(4326))
-        print(f"Raster 1 created: {r1_path}")
+        # 1. Define the Coordinate System we want (WGS84)
+        sr_wgs84 = arcpy.SpatialReference(4326)
 
-        # Raster 2: Smaller extent, slightly offset, some NoData
-        arcpy.management.CreateRasterDataset(
-            arcpy.env.workspace, "raster2.tif", 10, "32_BIT_FLOAT",
-            arcpy.SpatialReference(4326), 1
-        )
-        r2_path = os.path.join(arcpy.env.workspace, "raster2.tif")
-        arcpy.ia.CreateConstantRaster(0, "FLOAT", 1, 10, 10).save(r2_path)
-        arcpy.env.extent = arcpy.Extent(-10, -10, 10, 10) # Set a temporary extent for creation
-        with arcpy.da.UpdateCursor(r2_path, ["VALUE"]) as cursor:
-            for i, row in enumerate(cursor):
-                if i % 3 == 0: # Create some NoData
-                    row[0] = -9999
-                else:
-                    row[0] = i * 2
-                cursor.updateRow(row)
-        arcpy.management.SetRasterProperties(r2_path, "NODATA", "VALUE", "-9999")
-        arcpy.management.DefineProjection(r2_path, arcpy.SpatialReference(4326))
-        arcpy.env.extent = "DEFAULT" # Reset extent
-        print(f"Raster 2 created: {r2_path}")
+        # 2. Set a small cell size so we get plenty of pixels (not just 1 or 2)
+        cell_size = 1 
 
+        # === Raster 1: Base Square (0 to 100) ===
+        print("Generating Raster 1 (Base)...")
+        # Define extent in environment so CreateConstantRaster picks it up
+        arcpy.env.extent = arcpy.Extent(0, 0, 100, 100)
+        
+        r1_base = CreateConstantRaster(10, "FLOAT", cell_size)
+        r1_path = os.path.join(temp_dir, "raster1.tif")
+        r1_base.save(r1_path)
+        arcpy.management.DefineProjection(r1_path, sr_wgs84)
 
-        # Raster 3: Similar extent to Raster 2, but different values
-        arcpy.management.CreateRasterDataset(
-            arcpy.env.workspace, "raster3.tif", 10, "32_BIT_FLOAT",
-            arcpy.SpatialReference(4326), 1
-        )
-        r3_path = os.path.join(arcpy.env.workspace, "raster3.tif")
-        arcpy.ia.CreateConstantRaster(0, "FLOAT", 1, 10, 10).save(r3_path)
-        arcpy.env.extent = arcpy.Extent(-5, -5, 15, 15) # Set a temporary extent for creation
-        with arcpy.da.UpdateCursor(r3_path, ["VALUE"]) as cursor:
-            for i, row in enumerate(cursor):
-                if i % 4 == 0: # Create some NoData
-                    row[0] = -9999
-                else:
-                    row[0] = i + 100
-                cursor.updateRow(row)
-        arcpy.management.SetRasterProperties(r3_path, "NODATA", "VALUE", "-9999")
-        arcpy.management.DefineProjection(r3_path, arcpy.SpatialReference(4326))
-        arcpy.env.extent = "DEFAULT" # Reset extent
-        print(f"Raster 3 created: {r3_path}")
+        # === Raster 2: Shifted Right (20 to 120) ===
+        # Intersection with R1 will be X: 20-100 (80 pixels wide)
+        print("Generating Raster 2 (Offset X)...")
+        arcpy.env.extent = arcpy.Extent(20, 0, 120, 100)
+        
+        r2_base = CreateConstantRaster(5, "FLOAT", cell_size)
+        r2_path = os.path.join(temp_dir, "raster2.tif")
+        r2_base.save(r2_path)
+        arcpy.management.DefineProjection(r2_path, sr_wgs84)
+
+        # === Raster 3: Shifted Up (0 to 100, but Y is 20 to 120) ===
+        # Intersection with R1+R2 will be X: 20-100, Y: 20-100
+        print("Generating Raster 3 (Offset Y)...")
+        arcpy.env.extent = arcpy.Extent(0, 20, 100, 120)
+        
+        r3_base = CreateConstantRaster(20, "FLOAT", cell_size)
+        r3_path = os.path.join(temp_dir, "raster3.tif")
+        r3_base.save(r3_path)
+        arcpy.management.DefineProjection(r3_path, sr_wgs84)
+
+        # Reset extent to default so future tools aren't limited
+        arcpy.env.extent = "DEFAULT"
 
         input_rasters_list = [r1_path, r2_path, r3_path]
 
-        # Run the function
+        # --- Run the function ---
         print("\n--- Generating Intersection Mask ---")
-        output_mask_path = MultiscaleAlignMasking.return_valid_data_mask_intersection(input_rasters_list)
-
-        if output_mask_path:
-            print(f"Intersection mask created at: {output_mask_path}")
-            # Verify the properties of the output mask
-            mask_desc = arcpy.Describe(output_mask_path)
-            print(f"Output mask extent: {mask_desc.extent}")
-            print(f"Output mask cell size: {mask_desc.meanCellWidth}")
-
-            # Compare with original rasters' extents
-            r1_desc = arcpy.Describe(r1_path)
-            r2_desc = arcpy.Describe(r2_path)
-            r3_desc = arcpy.Describe(r3_path)
-            
-            print(f"Raster 1 extent: {r1_desc.extent}")
-            print(f"Raster 2 extent: {r2_desc.extent}")
-            print(f"Raster 3 extent: {r3_desc.extent}")
-            
-            # The mask's extent should be the intersection of these.
-            # You can visually inspect by loading the mask and original rasters in ArcMap/Pro.
+        
+        # NOTE: Ensure this class is actually imported or defined above
+        intersection_mask, valid_rasters = MultiscaleAlignMasking.return_valid_data_mask_intersection(input_rasters_list)
+        # Generate terrain products of all of the dems and align the backscatter files
+        for input_dem in valid_rasters:
+            # Create an instance of the ProcessDEM class with the specified parameters
+            generateHabitatDerivates = ProcessDem(
+                                            input_dem=input_dem,
+                                            input_bs=None,
+                                            binary_mask=intersection_mask,
+                                            divisions=None,  # Divide the height by this to run tile processing
+                                            shannon_window=[3, 9, 21],
+                                            fill_method="IDW",
+                                            fill_iterations=1,
+                                            water_elevation=183.6,
+                                            keep_chunks=False,
+                                            bypass_mosaic=False,
+                                            )
+            # Process the DEM and generate the habitat derivatives
+            generateHabitatDerivates.process_dem()
 
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         print(f"An error occurred: {e}")
+        
     finally:
-        # Clean up dummy rasters
-        if 'r1_path' in locals() and arcpy.Exists(r1_path):
-            arcpy.management.Delete(r1_path)
-        if 'r2_path' in locals() and arcpy.Exists(r2_path):
-            arcpy.management.Delete(r2_path)
-        if 'r3_path' in locals() and arcpy.Exists(r3_path):
-            arcpy.management.Delete(r3_path)
-        print("\nCleaned up dummy rasters.")
+        # cleanup logic...
+        print("\nFinished.")
 
 if __name__ == "__main__":
     tester()

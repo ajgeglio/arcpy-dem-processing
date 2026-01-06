@@ -81,7 +81,11 @@ python scripts/generateProducts.py --input_dem "path/to/dem.tif" [OPTIONS]
 | `--products` | List | *All* | Space-separated list of products to generate (see list below). |
 | `--shannon_window` | List | `3 9 21` | Window sizes (in pixels) for Shannon Entropy texture analysis. |
 | `--fill_method` | Str | `IDW` | Method to fill small internal voids before processing: `IDW`, `FocalStatistics`, or `NoFill`. |
-| `--remove_chunks` | Flag | `False` | If set, deletes temporary tile chunks after the final mosaic is created. |
+| `--fill_iterations` | Int | `1` | Number of iterations for filling voids in the DEM.|
+|`--min_area` | Int | `50` | Minimum area to filter boundary polygon in Eliminate Polygon Part (Data Management) prior to binary mask creation. |
+| `water_elevation` | Float | `183.6` | Water elevation (m) for the depth raster, defaults to high elevation reference for the Great Lakes |
+| `--keep_chunks` | Flag | `False` | If set, it keeps temporary tile chunks after the final mosaic is created. This can be helpful when testing on large products. |
+| `--bypass_mosaic` | Flag | `False` | Bypass creation of the depth raster, the default behavior is to convert to depth if elevation DEM is given. |
 
 ### Available Products
 You can specify any combination of the following for the `--products` argument:
@@ -137,9 +141,9 @@ C:\path\to\base\directory\           <-- BASE_DIR
 To ensure statistical validity and seamless output, the tool applies the following processing chain:
 
 <p align="left">
-  <img src="thumb1.png" width="24%" alt="Hillshade"/>
-  <img src="thumb2.png" width="24.6%" alt="Shannon Entropy"/>
-  <img src="thumb3.png" width="24.6%" alt="Shannon Entropy"/>
+  <img src="extras/thumb1.png" width="24%" alt="Hillshade"/>
+  <img src="extras/thumb2.png" width="24.6%" alt="Shannon Entropy"/>
+  <img src="extras/thumb3.png" width="24.6%" alt="Shannon Entropy"/>
 </p>
 <p align="left">
   <em><strong>Figure 1.</strong> Derived Products of Bay Harbor, Lake Michigan multibeam survey. Hillshade shown on left, the Shannon entropy texture analysis middle, and the 10-class landforms (geomorphons) right.</em>

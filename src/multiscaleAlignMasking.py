@@ -1,16 +1,15 @@
 import arcpy
 import os
 from arcpy.sa import Con, IsNull, Raster, SetNull
-from arcpy import Extent # Import Extent object for manipulation
-from metafunctions import MetaFunctions
+from arcpy import Extent
+# Assuming MetaFunctions and Utils are in your path
+# from metafunctions import MetaFunctions
 from utils import Utils
 
 class MultiscaleAlignMasking:
     @staticmethod
     def _intersect_extents(ext1, ext2):
-        """
-        Returns the intersection of two arcpy.Extent objects, or None if they do not overlap.
-        """
+        """Returns the intersection of two arcpy.Extent objects."""
         xmin = max(ext1.XMin, ext2.XMin)
         xmax = min(ext1.XMax, ext2.XMax)
         ymin = max(ext1.YMin, ext2.YMin)
@@ -21,129 +20,109 @@ class MultiscaleAlignMasking:
 
     @staticmethod
     def return_valid_data_mask_intersection(input_rasters, replace=True):
-        """
-        Generates a binary mask representing the intersection of valid data areas
-        from a list of input rasters, limited to the common spatial extent.
-        Returns a raster where 1 indicates valid data in all input rasters,
-        and NoData otherwise.
-        """
         if not input_rasters:
-            arcpy.AddWarning("Input raster list is empty. Cannot create intersection mask.")
+            arcpy.AddWarning("Input raster list is empty.")
             return None
 
         arcpy.env.overwriteOutput = True
-
         valid_rasters = []
         common_extent = None
-        first_valid_raster_obj = None
-        intersection_mask = None
-        print("Starting raster processing loop...")
-        for raster_path in input_rasters:
+        master_raster_path = None
+        master_sr = None
+        
+        print(f"Aligning {len(input_rasters)} rasters to master grid...")
+
+        for i, raster_path in enumerate(input_rasters):
             if not arcpy.Exists(raster_path):
-                arcpy.AddWarning(f"Raster not found: {raster_path}. Skipping for intersection mask.")
                 continue
 
             desc = arcpy.Describe(raster_path)
-            current_raster_obj = Raster(raster_path)
-            current_extent = desc.extent
-            base_cell_size_x = desc.meanCellWidth
-            base_cell_size_y = desc.meanCellHeight
-            cell_size = f"{base_cell_size_x} {base_cell_size_y}" # Change cell size to the raster being processed
-            # arcpy.env.cellSize = cell_size
+            
+            # 1. Establish the Master (First Valid Raster)
+            if master_raster_path is None:
+                master_raster_path = raster_path
+                master_sr = desc.spatialReference
+                master_cell_x = desc.meanCellWidth
+                master_cell_y = desc.meanCellHeight
+                common_extent = desc.extent
+                valid_rasters.append(raster_path)
+                continue
 
-            if first_valid_raster_obj is None:
-                common_extent = current_extent
-                first_valid_raster_obj = current_raster_obj
-                first_valid_raster_coordinate_system = desc.spatialReference
-                # Set snapRaster and output coordinate system to first valid raster
-                arcpy.env.snapRaster = raster_path
-                arcpy.env.outputCoordinateSystem = first_valid_raster_coordinate_system
+            # 2. Alignment Logic for subsequent rasters
+            aligned_path = os.path.join(os.path.dirname(raster_path), 
+                                        os.path.splitext(os.path.basename(raster_path))[0] + "_aligned.tif")
+            backup_path = os.path.join(os.path.dirname(raster_path), 
+                                       os.path.splitext(os.path.basename(raster_path))[0] + "_original.tif")
 
-            else:
-                common_extent = MultiscaleAlignMasking._intersect_extents(common_extent, current_extent)
-                if common_extent is None:
-                    arcpy.AddWarning("Input rasters do not have any overlapping extent. Cannot create intersection mask.")
-                    del current_raster_obj
-                    return None
-                # align the current raster to the first valid raster's coordinate system
-                current_aligned_raster_path = os.path.join(
-                    os.path.dirname(raster_path), Utils.sanitize_path_to_name(raster_path) + "_aligned.tif")
-                backup_raster_path = os.path.join(
-                    os.path.dirname(raster_path), Utils.sanitize_path_to_name(raster_path) + "_original.tif")
-                arcpy.management.ProjectRaster(
-                    in_raster=raster_path,
-                    out_raster=current_aligned_raster_path,
-                    out_coor_system=first_valid_raster_coordinate_system,
-                    resampling_type="NEAREST",
-                    cell_size=cell_size
+            # Check if alignment is already done (Resume capability)
+            if not arcpy.Exists(aligned_path) and not (replace and arcpy.Exists(backup_path)):
+                # Calculate "Perfect Sub-pixel" cell size
+                # Forces current cell size to be a clean divisor of the master (e.g., 0.5 inside 1.0)
+                curr_cell_x = desc.meanCellWidth
+                curr_cell_y = desc.meanCellHeight
+                
+                # Logic: Find how many small pixels fit in one big pixel, round it, then divide master by that int.
+                div_x = max(1, round(master_cell_x / curr_cell_x))
+                div_y = max(1, round(master_cell_y / curr_cell_y))
+                target_cell_size = f"{master_cell_x / div_x} {master_cell_y / div_y}"
+
+                with arcpy.EnvManager(snapRaster=master_raster_path, outputCoordinateSystem=master_sr):
+                    arcpy.management.ProjectRaster(
+                        in_raster=raster_path,
+                        out_raster=aligned_path,
+                        out_coor_system=master_sr,
+                        resampling_type="NEAREST",
+                        cell_size=target_cell_size
                     )
-                        # Check if the alignment was successful
-                if not arcpy.Exists(current_aligned_raster_path):
-                    raise Exception(f"Failed to align raster: {raster_path} to reference raster")
+
+            # 3. Handle File Replacement/Cleanup
+            final_proc_path = raster_path
+            if arcpy.Exists(aligned_path):
                 if replace:
-                    # only backup the original raster once
-                    if arcpy.Exists(backup_raster_path):
-                        arcpy.management.Delete(raster_path)
+                    arcpy.ClearWorkspaceCache_management()
+                    if not arcpy.Exists(backup_path):
+                        arcpy.management.Rename(raster_path, backup_path)
                     else:
-                        arcpy.management.Rename(raster_path, backup_raster_path)
-                    arcpy.management.Rename(current_aligned_raster_path, raster_path)
+                        arcpy.management.Delete(raster_path)
+                    arcpy.management.Rename(aligned_path, raster_path)
+                    final_proc_path = raster_path
                 else:
-                    raster_path = current_aligned_raster_path
-                del current_raster_obj
-            valid_rasters.append(raster_path)
+                    final_proc_path = aligned_path
 
-        if not valid_rasters:
+            # Update Common Extent
+            new_desc = arcpy.Describe(final_proc_path)
+            common_extent = MultiscaleAlignMasking._intersect_extents(common_extent, new_desc.extent)
+            valid_rasters.append(final_proc_path)
 
-            print("No valid rasters found after processing input list.")
-            arcpy.AddWarning("No valid rasters found to create an intersection mask.")
-            return None
-
+        # 4. Generate Intersection Mask with Memory Management
+        print("Generating Intersection Mask (Multi-pass logic)...")
         arcpy.env.extent = common_extent
+        arcpy.env.snapRaster = master_raster_path
+        arcpy.env.cellSize = "MINOF" # Ensures final mask is at the highest resolution (e.g. 0.5m)
+
         intersection_mask = Con(IsNull(Raster(valid_rasters[0])), 0, 1)
+        
+        for i, raster_path in enumerate(valid_rasters[1:], 1):
+            curr_mask = Con(IsNull(Raster(raster_path)), 0, 1)
+            intersection_mask = intersection_mask * curr_mask
+            
+            # Collapse expresson tree every 10 rasters to prevent memory crash
+            if i % 10 == 0:
+                temp_mask = os.path.join(arcpy.env.scratchFolder, f"tmp_mask_{i}.tif")
+                intersection_mask.save(temp_mask)
+                intersection_mask = Raster(temp_mask)
 
-        for raster_path in valid_rasters[1:]:
-            try:
-                # Create binary mask for current raster
-                current_raster_obj = Raster(raster_path)
-                current_binary_mask = Con(IsNull(current_raster_obj), 0, 1)
-                message = f"Processing raster: {raster_path}"
-                message_length = Utils.print_progress(message)
-                intersection_mask = intersection_mask * current_binary_mask
+        # 5. Finalize and Save
+        output_mask_path = os.path.join(os.path.dirname(master_raster_path), "all_raster_intersection_mask.tif")
+        final_mask = SetNull(intersection_mask == 0, 1)
+        final_mask.save(output_mask_path)
 
-                del current_raster_obj
-                del current_binary_mask
-
-            except arcpy.ExecuteError as e:
-                arcpy.AddWarning(f"Error describing or processing raster {raster_path}: {e}. Skipping.")
-                continue
-            except Exception as e:
-                arcpy.AddWarning(f"Unexpected error with raster {raster_path}: {e}. Skipping.")
-                continue
-
-        # Save the final intersection mask after processing all rasters
-        output_mask_dir = os.path.dirname(valid_rasters[0])
-        output_mask_name = "all_raster_intersection_mask.tif"
-        output_mask_path = os.path.join(output_mask_dir, output_mask_name)
-        intersection_mask_final = SetNull(intersection_mask == 0, intersection_mask)
-        message = f"Saving intersection mask to: {output_mask_path}"
-        message_length = Utils.print_progress(message, previous_length=message_length)
-        intersection_mask_final.save(output_mask_path)
-        print()  # Force a newline so the progress bar is "finalized" 
-        binary_mask_filled_path = MetaFunctions.fill_mask_with_polygon_management(output_mask_path)
-        binary_mask_filled_object = Raster(binary_mask_filled_path)
-        intersection_mask_final = SetNull(binary_mask_filled_object == 0, binary_mask_filled_object)
-        intersection_mask_final.save(output_mask_path)
-        arcpy.Delete_management(binary_mask_filled_path)
-        # Clean up environment settings and objects
-        arcpy.env.extent = "DEFAULT" # Reset extent
-        arcpy.env.snapRaster = ""   # Clear snapRaster
-        print("\nFinished generating intersection mask")
+        # Optional Cleanup of intermediate envs
+        arcpy.env.extent = "DEFAULT"
+        arcpy.env.snapRaster = None
         arcpy.ClearWorkspaceCache_management()
-        if 'intersection_mask' in locals() and intersection_mask is not None:
-            del intersection_mask
-        if 'intersection_mask_final' in locals() and intersection_mask_final is not None:
-            del intersection_mask_final
-
+        
+        print(f"Success. Mask saved to: {output_mask_path}")
         return output_mask_path, valid_rasters
 
     @staticmethod
@@ -167,7 +146,7 @@ class MultiscaleAlignMasking:
         intersection_mask, aligned_rasters_list = MultiscaleAlignMasking.return_valid_data_mask_intersection(input_rasters_list)
         # --- 4. Separate Outputs back into DEM and BS ---
         # Using case-insensitive check for robustness
-        aligned_bss = [f for f in aligned_rasters_list if f"_{BS_MARKER}_".lower() in os.path.basename(f).lower()]
+        aligned_bss = [f for f in aligned_rasters_list if f"{BS_MARKER}".lower() in os.path.basename(f).lower()]
         aligned_dems = [f for f in aligned_rasters_list if f not in aligned_bss]
 
         # --- 5. Final Validation ---

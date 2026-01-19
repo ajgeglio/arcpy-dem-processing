@@ -200,14 +200,18 @@ class Utils:
         found_files = []
         for res in resolutions:
             # Construct filename: e.g., MP_BY_1m.tif
-            filename = f"{abrv}_{type_marker}_{res}.tif"
-            full_path = os.path.join(base_dir, res, filename)
+            filename1 = f"{abrv}_{type_marker}_{res}.tif"
+            filename2 = f"{abrv}_{res}_{type_marker}.tif"
+            full_path1 = os.path.join(base_dir, res, filename1)
+            full_path2 = os.path.join(base_dir, res, filename2)
             
-            if os.path.exists(full_path):
-                found_files.append(full_path)
+            if os.path.exists(full_path1):
+                found_files.append(full_path1)
+            elif os.path.exists(full_path2):
+                found_files.append(full_path2)
             else:
                 # Optional: Print info if a resolution is expected but missing
-                # print(f"Info: Skipping missing file: {filename}")
+                print(f"Info: Skipping missing file: {filename1} or {filename2}")
                 pass
                 
         return found_files

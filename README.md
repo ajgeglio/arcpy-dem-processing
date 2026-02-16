@@ -1,4 +1,4 @@
-# USGS Northern Lake Michigan Reefs: DEM Processing Tools
+# DEM Processing Tools
 
 This repository contains Python scripts and tools for processing, analyzing, and visualizing bathymetric data related to the USGS Northern Lake Michigan Reefs project. The toolkit automates the generation of spatial derivative products from Digital Elevation Models (DEMs) and Backscatter intensity data to support habitat classification.
 
@@ -194,4 +194,5 @@ This software has been approved for release by the U.S. Geological Survey (USGS)
 
 *   **Anthony Geglio** (ageglio@mtu.edu)
 *   **Peter Esselman** - USGS Great Lakes Science Center
+
 *   **Advanced Technology Lab** - Ann Arbor, MI

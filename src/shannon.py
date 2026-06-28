@@ -18,7 +18,7 @@ import tempfile
 import numpy as np
 from scipy import ndimage
 from scipy.stats import entropy
-from numba import njit
+# from numba import njit
 import uuid
 
 # Try imports for optional dependencies to prevent immediate import errors
@@ -30,11 +30,11 @@ except ImportError:
     arcpy = None
     gdal = None
 
-try:
-    from skimage.filters.rank import entropy as skimage_entropy
-except ImportError:
-    skimage_entropy = None
-    square = None
+# try:
+#     from skimage.filters.rank import entropy as skimage_entropy
+# except ImportError:
+#     skimage_entropy = None
+#     square = None
 
 
 # ==============================================================================
@@ -66,7 +66,7 @@ def _flow_direction_window_numpy(window):
     max_diff = np.max(diff)
     return direction_encoding[diff == max_diff].sum() if max_diff > 0 else 0
 
-@njit(fastmath=False, boundscheck=False)
+# @njit(fastmath=False, boundscheck=False)
 def _flow_direction_numba_jit(dem_data):
     """
     Low-level Numba implementation for D8 Flow Direction.
@@ -172,7 +172,7 @@ def _flow_direction_numba_jit(dem_data):
                 
     return out
 
-@njit(fastmath=False, boundscheck=False)
+# @njit(fastmath=False, boundscheck=False)
 def _entropy_numba_jit(padded_data, window_size):
     """
     Low-level Numba implementation for Windowed Entropy.

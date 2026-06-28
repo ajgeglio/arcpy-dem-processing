@@ -1,6 +1,6 @@
 import arcpy
 import numpy as np
-from skimage.feature import local_binary_pattern
+# from skimage.feature import local_binary_pattern
 from scipy import ndimage
 from osgeo import gdal
 from arcpy.sa import *
@@ -15,7 +15,41 @@ class HabitatDerivatives:
         self.transform = transform  # Optional, used for GDAL processing
         self.verbose = verbose
 
-    def calculate_lbp(self, n_points, radius, method='uniform', nodata=None):
+    def calculate_lbp(dem_data):
+        """
+        Replicates skimage.feature.local_binary_pattern(dem_data, P=8, R=1, method='default')
+        using pure NumPy.
+        """
+        # Pad the array so edge pixels have neighbors to compare against
+        padded = np.pad(dem_data, pad_width=1, mode='edge')
+        
+        # The center pixels (same shape as original dem_data)
+        center = padded[1:-1, 1:-1]
+        
+        # Initialize the output array
+        lbp = np.zeros_like(center, dtype=np.uint8)
+        
+        # Extract the 8 shifted arrays (representing the 8 neighbors)
+        # The order below replicates a standard circular/clockwise neighbor check
+        neighbors = [
+            padded[0:-2, 2:],   # Top-Right
+            padded[0:-2, 1:-1], # Top-Center
+            padded[0:-2, 0:-2], # Top-Left
+            padded[1:-1, 0:-2], # Left
+            padded[2:, 0:-2],   # Bottom-Left
+            padded[2:, 1:-1],   # Bottom-Center
+            padded[2:, 2:],     # Bottom-Right
+            padded[1:-1, 2:]    # Right
+        ]
+        
+        # Calculate the binary pattern
+        for i, neighbor in enumerate(neighbors):
+            # If neighbor >= center, bit is 1. Shift it by i bits and add to total.
+            lbp += (neighbor >= center).astype(np.uint8) * (2 ** i)
+            
+        return lbp
+
+    def calculate_lbp_skimage(self, n_points, radius, method='uniform', nodata=None):
         """
         Generate LBP using raw float data.
         Returns float32 to ensure compatibility with ArcPy mosaicking.
@@ -338,6 +372,7 @@ class HabitatDerivatives:
         # 3. Step B: Calculate Entropy
         # We use skimage because it is the C-optimized, stable version.
         try:
+            import skimage
             shannon_index = shannon_tool.calculate_shannon_skimage(
                 flow_direction, 
                 window_size

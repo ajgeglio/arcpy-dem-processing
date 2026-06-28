@@ -1,6 +1,6 @@
 from osgeo import gdal
-import rasterio
-from rasterio.enums import Resampling
+# import rasterio
+# from rasterio.enums import Resampling
 import numpy as np
 import os
 import glob

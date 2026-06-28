@@ -1,16 +1,16 @@
-import rasterio
+# import rasterio
 import os
 import arcpy
 from arcpy.sa import *
 from utils import Utils
 from arcpyUtils import ArcpyUtils
 from rasterUtils import RasterUtils
-from gdalUtils import GdalUtils
+# from gdalUtils import GdalUtils
 from inpainter import Inpainter
 from metafunctions import MetaFunctions
 import time
 import warnings
-from rasterio.windows import Window
+# from rasterio.windows import Window
 from derivatives import HabitatDerivatives
 from landforms import Landforms
 import numpy as np
@@ -334,32 +334,51 @@ class ProcessDem:
         arcpy.env.snapRaster = self.original_snap_raster
         arcpy.env.cellSize = self.original_cell_size
 
-        if not self.divisions:
-            with rasterio.open(input_dem) as src:
-                dem_data = src.read(1, masked=True)
-                transform = src.transform
-                crs = src.crs
-                metadata = src.meta
-                src_nodata = metadata['nodata'] # Capture original nodata
-                
-                # Prepare data for processing (NaNs for floats)
-                dem_data_filled = RasterUtils.replace_nodata_with_nan(dem_data, src_nodata)
-                # --- ADD THIS SANITIZATION ---
-                if np.issubdtype(dem_data_filled.dtype, np.floating):
-                    with np.errstate(invalid='ignore'):
-                        dem_data_filled[dem_data_filled < -15000.0] = np.nan
-                # -----------------------------
-                if RasterUtils.is_empty(dem_data_filled, src_nodata):
-                    message = "The DEM data is empty after filling no-data values."
-                    self.message_length = Utils.print_progress(message, self.message_length)
-                    return None
+        raster_obj = arcpy.Raster(input_dem)
+        # Capture Metadata (Equivalent to src.meta)
+        # ArcPy handles the transform/CRS internally, but if you need them:
+        crs = raster_obj.spatialReference
+        src_nodata = raster_obj.noDataValue
+        extent = raster_obj.extent  # Use this for saving back to disk later
+        desc = arcpy.Describe(raster_obj)
+        # Get the cell size
+        cell_width = raster_obj.meanCellWidth
+        cell_height = raster_obj.meanCellHeight  # Usually same as width
 
-                # Create a Boolean Mask of where the Data is MISSING
-                # We will use this to clean up the output products
-                if np.issubdtype(dem_data_filled.dtype, np.floating):
-                    dem_missing_mask = np.isnan(dem_data_filled)
-                else:
-                    dem_missing_mask = (dem_data_filled == src_nodata)
+        # Get the origin (Upper Left)
+        # Note: raster_obj.extent gives LowerLeft, but Affine transforms 
+        # usually start from the Upper Left.
+        ext = raster_obj.extent
+        origin_x = ext.XMin
+        origin_y = ext.YMax  # Top-left Y
+        transform = (cell_width, 0, origin_x, 0, -cell_height, origin_y)
+
+        # 3. Convert to NumPy for the sanitization/masking
+        # This creates a masked array if the raster has NoData defined
+        dem_data = arcpy.RasterToNumPyArray(raster_obj, nodata_to_value=np.nan)
+
+        if not self.divisions:
+
+            # 4. Sanitization (Your custom logic)
+            dem_data_filled = dem_data.copy()
+
+            if np.issubdtype(dem_data_filled.dtype, np.floating):
+                with np.errstate(invalid='ignore'):
+                    # Apply your -15000 threshold
+                    dem_data_filled[dem_data_filled < -15000.0] = np.nan
+
+            # 5. Check if empty
+            # Using np.all(np.isnan()) is the direct translation for "is_empty"
+            if np.all(np.isnan(dem_data_filled)):
+                arcpy.AddWarning("The DEM data is empty after filling no-data values.")
+                # return None logic here
+
+            # 6. Create the Missing Mask
+            if np.issubdtype(dem_data_filled.dtype, np.floating):
+                dem_missing_mask = np.isnan(dem_data_filled)
+            else:
+                # If it's an integer raster, ArcPy uses the specific NoData value
+                dem_missing_mask = (dem_data_filled == src_nodata)
 
             # Process and write each product one at a time
             for data, output_file in generate_products(input_dem, dem_data_filled, transform, verbose=True):
@@ -374,22 +393,24 @@ class ProcessDem:
                         data[dem_missing_mask] = 0
                         out_nodata = 0
 
-                    # 2. WRITE WITH COMPRESSION
-                    with rasterio.open(
-                        output_file,
-                        'w',
-                        driver='GTiff',
-                        compress='lzw',          # <--- Added Compression
-                        height=dem_data_filled.shape[0],
-                        width=dem_data_filled.shape[1],
-                        count=1,
-                        dtype=data.dtype,
-                        crs=crs,
-                        transform=transform,
-                        nodata=out_nodata        # <--- Added Explicit NoData
-                    ) as dst:
-                        dst.write(data, 1)
-                        dst.update_tags(**src.tags())
+                    # 1. Set compression and NoData environments
+                    arcpy.env.compression = "LZW"
+                    arcpy.env.outputCoordinateSystem = crs  # The SpatialReference object from earlier
+
+                    # 2. Convert NumPy array back to an ArcPy Raster
+                    # lower_left_corner is a Point object (XMin, YMin)
+                    lower_left = arcpy.Point(raster_obj.extent.XMin, raster_obj.extent.YMin)
+                    cell_size = raster_obj.meanCellWidth
+
+                    new_raster = arcpy.NumPyArrayToRaster(
+                        data, 
+                        lower_left, 
+                        cell_size, 
+                        value_to_nodata=out_nodata
+                    )
+
+                    # 3. Save to disk (Compression is applied here automatically)
+                    new_raster.save(output_file)
 
                 # Assert output spatial reference matches input
                 if os.path.exists(output_file):
@@ -423,180 +444,178 @@ class ProcessDem:
             
             print(f"Applying overlap of {overlap_px} pixels per tile side.")
 
-            with rasterio.open(input_dem) as src:
-                original_dem_crs = src.crs
-                tile_size = max(1, src.height // self.divisions)
-                n_tiles_y = (src.height + tile_size - 1) // tile_size
-                n_tiles_x = (src.width + tile_size - 1) // tile_size
-                total_tiles = n_tiles_y * n_tiles_x
-                tile_counter = 0
 
-                arcpy.env.outputCoordinateSystem = self.original_spatial_ref
-                arcpy.env.snapRaster = self.original_snap_raster
-                arcpy.env.cellSize = self.original_cell_size
-                arcpy.env.overwriteOutput = True
+            original_dem_crs = crs
+            tile_size = max(1, cell_height // self.divisions)
+            n_tiles_y = (cell_height + tile_size - 1) // tile_size
+            n_tiles_x = (cell_width + tile_size - 1) // tile_size
+            total_tiles = n_tiles_y * n_tiles_x
+            tile_counter = 0
 
-                for i in range(0, src.height, tile_size):
-                    for j in range(0, src.width, tile_size):
-                        tile_counter += 1
+
+            for i in range(0, cell_height, tile_size):
+                for j in range(0, cell_width, tile_size):
+                    tile_counter += 1
+                    
+                    # --- OPTIMIZATION 1: Identify Skippable Products ---
+                    chunks_to_skip = []
+
+                    for prod_key, prod_master_path in output_files.items():
+                        prod_dir = os.path.dirname(prod_master_path)
+                        prod_name = os.path.basename(prod_master_path).split(".")[0]
+                        chunk_folder = os.path.join(prod_dir, prod_name)
+                        chunk_path = os.path.join(chunk_folder, f"{prod_name}_chunk_{i}_{j}.tif")
                         
-                        # --- OPTIMIZATION 1: Identify Skippable Products ---
-                        chunks_to_skip = []
-
-                        for prod_key, prod_master_path in output_files.items():
-                            prod_dir = os.path.dirname(prod_master_path)
-                            prod_name = os.path.basename(prod_master_path).split(".")[0]
-                            chunk_folder = os.path.join(prod_dir, prod_name)
-                            chunk_path = os.path.join(chunk_folder, f"{prod_name}_chunk_{i}_{j}.tif")
-                            
-                            if os.path.exists(chunk_path):
-                                chunks_to_skip.append(prod_key)
-                        
-                        # --- BUG FIX START: Only continue if ALL products exist ---
-                        if len(chunks_to_skip) == len(output_files):
-                            message = f"Skipping Tile {tile_counter}/{total_tiles} (All products exist)"
-                            self.message_length = Utils.print_progress(message, self.message_length)
-                            continue
-                        # --- BUG FIX END ---
-                        # -----------------------------------------------------
-
-                        # A. Define Write Window
-                        target_width = min(tile_size, src.width - j)
-                        target_height = min(tile_size, src.height - i)
-                        write_window = Window(j, i, target_width, target_height)
-                        write_transform = src.window_transform(write_window)
-
-                        # B. Define Read Window
-                        read_row_start = max(0, i - overlap_px)
-                        read_col_start = max(0, j - overlap_px)
-                        read_row_stop = min(src.height, i + target_height + overlap_px)
-                        read_col_stop = min(src.width, j + target_width + overlap_px)
-                        read_window = Window.from_slices((read_row_start, read_row_stop), (read_col_start, read_col_stop))
-                        
-                        pad_top = i - read_row_start
-                        pad_left = j - read_col_start
-                        
-                        # C. Read and Save the Buffered Chunk
-                        chunk_dem_path = os.path.join(dem_chunk_temp_folder, f"{self.dem_name}_chunk_{i}_{j}.tif")
-                        
-                        # Optimization 2: Reuse temp chunk if available
-                        chunk_data_padded = None
-                        chunk_transform_padded = None
-                        
-                        if os.path.exists(chunk_dem_path):
-                            try:
-                                with rasterio.open(chunk_dem_path) as tmp_src:
-                                    chunk_data_padded = tmp_src.read(1)
-                                    chunk_transform_padded = tmp_src.transform
-                            except Exception:
-                                chunk_data_padded = None
-
-                        if chunk_data_padded is None:
-                            chunk_data_padded = src.read(1, window=read_window)
-                            chunk_transform_padded = src.window_transform(read_window)
-                            
-                            # --- 1. SANITIZE BEFORE WRITING (Critical Fix) ---
-                            # This prevents "Dirty" data (3.4e38) from ever touching the disk.
-                            if np.issubdtype(chunk_data_padded.dtype, np.floating):
-                                with np.errstate(invalid='ignore'):
-                                    # Catch huge positive/negative artifacts
-                                    mask = np.abs(chunk_data_padded) > 100000.0
-                                    if np.any(mask):
-                                        chunk_data_padded[mask] = src.nodata if src.nodata is not None else np.nan
-                            # ------------------------------------------------
-
-                            with rasterio.open(
-                                chunk_dem_path, 'w', driver='GTiff', compress='lzw',
-                                height=chunk_data_padded.shape[0], width=chunk_data_padded.shape[1],
-                                count=1, dtype=str(chunk_data_padded.dtype),
-                                crs=original_dem_crs, transform=chunk_transform_padded,
-                                nodata=src.nodata 
-                            ) as dst:
-                                dst.write(chunk_data_padded, 1)
-
-                        # --- Apply Tiled Filling ---
-                        if self.divisions and self.fill_method is not None:
-                            # Note: We check for NaNs OR the NoData value
-                            should_fill = False
-                            if np.isnan(chunk_data_padded).any():
-                                should_fill = True
-                            elif src.nodata is not None and (chunk_data_padded == src.nodata).any():
-                                should_fill = True
-
-                            if should_fill:
-                                # --- BRANCH LOGIC ---
-                                if self.fill_method == "IDW":
-                                    chunk_dem_path = Inpainter.fill_chunk_idw(
-                                        chunk_dem_path, 
-                                        iterations=self.fill_iterations,
-                                        power=2.0,
-                                        search_radius=5.0 # Adjust search radius as needed
-                                    )
-                                elif self.fill_method == "FocalStatistics":
-                                    chunk_dem_path = Inpainter.fill_chunk_focal_stats(
-                                        chunk_dem_path, 
-                                        iterations=self.fill_iterations,
-                                        kernel_size=9
-                                    )
-                                # Reload data (Only once!)
-                                with rasterio.open(chunk_dem_path) as src_filled:
-                                    chunk_data_padded = src_filled.read(1)
-                                    
-                                # --- 2. POST-FILL SANITIZATION (Safety Net) ---
-                                # If the Inpainter created new artifacts, we clean them 
-                                # AND update the file so ArcPy doesn't choke.
-                                if np.issubdtype(chunk_data_padded.dtype, np.floating):
-                                    with np.errstate(invalid='ignore'):
-                                        mask = np.abs(chunk_data_padded) > 100000.0
-                                        if np.any(mask):
-                                            message = f"Sanitized artifacts in tile {tile_counter}"
-                                            self.message_length = Utils.print_progress(message, self.message_length)
-                                            chunk_data_padded[mask] = np.nan
-                                            
-                                            # UPDATE THE FILE ON DISK
-                                            with rasterio.open(chunk_dem_path, 'r+') as dst:
-                                                dst.write(chunk_data_padded, 1)
-                                    
-                        message = f"Processing tile {tile_counter}/{total_tiles} (Skipping: {len(chunks_to_skip)})"
+                        if os.path.exists(chunk_path):
+                            chunks_to_skip.append(prod_key)
+                    
+                    # --- BUG FIX START: Only continue if ALL products exist ---
+                    if len(chunks_to_skip) == len(output_files):
+                        message = f"Skipping Tile {tile_counter}/{total_tiles} (All products exist)"
                         self.message_length = Utils.print_progress(message, self.message_length)
-                        # D. Generate Products (Pass Skip List)
-                        for data, output_file in generate_products(chunk_dem_path, chunk_data_padded, chunk_transform_padded, verbose=False, products_to_skip=chunks_to_skip):
-                            output_dir = os.path.dirname(output_file)
-                            product_name = os.path.basename(output_file).split(".")[0]
-                            product_folder = os.path.join(output_dir, product_name)
-                            os.makedirs(product_folder, exist_ok=True)
-                            chunk_output_file = os.path.join(product_folder, f"{product_name}_chunk_{i}_{j}.tif")
+                        continue
+                    # --- BUG FIX END ---
+                    # -----------------------------------------------------
+                    # A. Define the Dimensions (Same as your logic)
+                    # Note: 'cell_width' here refers to total columns in the original raster
+                    target_width = min(tile_size, n_tiles_x - j)
+                    target_height = min(tile_size, n_tiles_y - i)
 
-                            if data is None:
-                                if arcpy.Exists(output_file):
-                                    try:
-                                        arcpy.management.Copy(output_file, chunk_output_file)
-                                        arcpy.management.Delete(output_file)
-                                    except Exception: pass
+                    # B. Calculate the Spatial Origin for this Tile
+                    # In ArcPy, to save a tile, we need the Lower-Left corner of THAT tile.
+                    # i is the row index (starting from top)
+                    tile_x_min = ext.XMin + (j * cell_width)
+                    tile_y_max = ext.YMax - (i * cell_height)
+                    tile_y_min = tile_y_max - (target_height * cell_height)
+
+                    tile_lower_left = arcpy.Point(tile_x_min, tile_y_min)
+
+                    # C. The "Transform" equivalent
+                    # If you have downstream code needing the (a, b, c, d, e, f) tuple for this tile:
+                    write_transform = (cell_width, 0, tile_x_min, 0, -cell_height, tile_y_max)
+
+                    # --- B. Define Read Window ---
+                    read_row_start = max(0, i - overlap_px)
+                    read_col_start = max(0, j - overlap_px)
+                    read_row_stop = min(cell_height, i + target_height + overlap_px)
+                    read_col_stop = min(cell_width, j + target_width + overlap_px)
+
+                    # [FIX 1] Restore padding calculations for cropping the final arrays
+                    pad_top = i - read_row_start
+                    pad_left = j - read_col_start
+
+                    # Calculate dimensions for the read
+                    num_cols_to_read = read_col_stop - read_col_start
+                    num_rows_to_read = read_row_stop - read_row_start
+
+                    # Calculate the Top-Left coordinate for the read
+                    read_x_min = ext.XMin + (read_col_start * cell_width)
+                    read_y_max = ext.YMax - (read_row_start * cell_height)
+                    read_top_left = arcpy.Point(read_x_min, read_y_max)
+                    
+                    # [FIX 2] Create the Transform tuple for the buffered chunk
+                    chunk_transform_padded = (cell_width, 0, read_x_min, 0, -cell_height, read_y_max)
+
+                    # --- C. Read and Save the Buffered Chunk ---
+                    chunk_dem_path = os.path.join(dem_chunk_temp_folder, f"{self.dem_name}_chunk_{i}_{j}.tif")
+
+                    # Check if file exists (Optimization)
+                    chunk_data_padded = None
+                    if os.path.exists(chunk_dem_path):
+                        try:
+                            # Use arcpy.Raster to read existing temp file
+                            tmp_rast = arcpy.Raster(chunk_dem_path)
+                            chunk_data_padded = arcpy.RasterToNumPyArray(tmp_rast)
+                        except Exception:
+                            chunk_data_padded = None
+
+                    if chunk_data_padded is None:
+                        # Perform the "Windowed" read from the source raster
+                        chunk_data_padded = arcpy.RasterToNumPyArray(
+                            raster_obj, 
+                            upper_left_corner=read_top_left,
+                            ncols=num_cols_to_read,
+                            nrows=num_rows_to_read,
+                            nodata_to_value=np.nan
+                        )
+
+                        # --- 1. SANITIZE ---
+                        if np.issubdtype(chunk_data_padded.dtype, np.floating):
+                            with np.errstate(invalid='ignore'):
+                                mask = np.abs(chunk_data_padded) > 100000.0
+                                if np.any(mask):
+                                    chunk_data_padded[mask] = np.nan
+
+                        # --- WRITE TO DISK (Using the ArcPy Save method) ---
+                        arcpy.env.compression = "LZW"
+                        # To save, we need the LOWER left of this specific chunk
+                        chunk_y_min = read_y_max - (num_rows_to_read * cell_height)
+                        chunk_lower_left = arcpy.Point(read_x_min, chunk_y_min)
+                        
+                        tmp_chunk_rast = arcpy.NumPyArrayToRaster(
+                            chunk_data_padded, 
+                            chunk_lower_left, 
+                            cell_width, cell_height, 
+                            value_to_nodata=np.nan
+                        )
+                        tmp_chunk_rast.save(chunk_dem_path)
+                                    
+                    message = f"Processing tile {tile_counter}/{total_tiles} (Skipping: {len(chunks_to_skip)})"
+                    self.message_length = Utils.print_progress(message, self.message_length)
+                    
+                    # D. Generate Products (Pass Skip List)
+                    for data, output_file in generate_products(chunk_dem_path, chunk_data_padded, chunk_transform_padded, verbose=False, products_to_skip=chunks_to_skip):
+                        output_dir = os.path.dirname(output_file)
+                        product_name = os.path.basename(output_file).split(".")[0]
+                        product_folder = os.path.join(output_dir, product_name)
+                        os.makedirs(product_folder, exist_ok=True)
+                        chunk_output_file = os.path.join(product_folder, f"{product_name}_chunk_{i}_{j}.tif")
+
+                        if data is None:
+                            if arcpy.Exists(output_file):
+                                try:
+                                    arcpy.management.Copy(output_file, chunk_output_file)
+                                    arcpy.management.Delete(output_file)
+                                except Exception: pass
+                        else:
+                            cropped_data = data[pad_top : pad_top + target_height, pad_left : pad_left + target_width]
+                            cropped_dem = chunk_data_padded[pad_top : pad_top + target_height, pad_left : pad_left + target_width]
+                            
+                            if np.issubdtype(cropped_dem.dtype, np.floating):
+                                mask = np.isnan(cropped_dem)
                             else:
-                                cropped_data = data[pad_top : pad_top + target_height, pad_left : pad_left + target_width]
-                                cropped_dem = chunk_data_padded[pad_top : pad_top + target_height, pad_left : pad_left + target_width]
-                                
-                                if np.issubdtype(cropped_dem.dtype, np.floating):
-                                    mask = np.isnan(cropped_dem)
-                                else:
-                                    mask = (cropped_dem == src.nodata) if src.nodata is not None else (cropped_dem == 0)
+                                # [FIX 3] Changed src.nodata to src_nodata
+                                mask = (cropped_dem == src_nodata) if src_nodata is not None else (cropped_dem == 0)
 
-                                if np.issubdtype(cropped_data.dtype, np.floating):
-                                    cropped_data[mask] = np.nan
-                                    out_nodata = np.nan
-                                else:
-                                    cropped_data[mask] = 0 
-                                    out_nodata = 0
+                            if np.issubdtype(cropped_data.dtype, np.floating):
+                                cropped_data[mask] = np.nan
+                                out_nodata = np.nan
+                            else:
+                                cropped_data[mask] = 0 
+                                out_nodata = 0
 
-                                with rasterio.open(
-                                    chunk_output_file, 'w', driver='GTiff', compress='lzw',
-                                    height=cropped_data.shape[0], width=cropped_data.shape[1],
-                                    count=1, dtype=cropped_data.dtype,
-                                    crs=original_dem_crs, transform=write_transform, nodata=out_nodata
-                                ) as dst:
-                                    dst.write(cropped_data, 1)
-                                    dst.update_tags(**src.tags())
+                            # [FIX 4] Completely replaced rasterio.open write block with ArcPy logic
+                            arcpy.env.compression = "LZW"
+                            arcpy.env.outputCoordinateSystem = original_dem_crs
+                            
+                            out_chunk_rast = arcpy.NumPyArrayToRaster(
+                                cropped_data, 
+                                tile_lower_left, # We calculated this at the top of the loop!
+                                cell_width, 
+                                cell_height, 
+                                value_to_nodata=out_nodata
+                            )
+                            out_chunk_rast.save(chunk_output_file)
+                            
+                            # Memory management: Clean up temporary raster objects
+                            del out_chunk_rast
+
+                        if os.path.exists(chunk_output_file):
+                            try:
+                                out_desc = arcpy.Describe(chunk_output_file)
+                            except Exception: pass
+                        else:
+                            print(f"Warning: Output chunk was not created for tile {i},{j}.")
 
                             if os.path.exists(chunk_output_file):
                                 try:
